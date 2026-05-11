@@ -586,6 +586,36 @@ func TestListRunsNoRunsDir(t *testing.T) {
 	}
 }
 
+// TestPrintAuditHeader_BundleLine verifies the Bundle: line is printed in the
+// audit header when the AuditReport has a non-empty BundleIdentity.
+func TestPrintAuditHeader_BundleLine(t *testing.T) {
+	r := &tracker.AuditReport{
+		RunID:          "test-run",
+		Status:         "success",
+		BundleIdentity: "sha256:efb5648d28e6c2",
+	}
+	out := captureStdout(t, func() { printAuditHeader(r) })
+	if !strings.Contains(out, "Bundle:") {
+		t.Errorf("Bundle: line missing:\n%s", out)
+	}
+	if !strings.Contains(out, "sha256:efb5648d28e6c2") {
+		t.Errorf("identity not in header:\n%s", out)
+	}
+}
+
+// TestPrintAuditHeader_NoBundleLine_WhenIdentityEmpty verifies the Bundle: line
+// is omitted entirely when BundleIdentity is empty (plain .dip runs).
+func TestPrintAuditHeader_NoBundleLine_WhenIdentityEmpty(t *testing.T) {
+	r := &tracker.AuditReport{
+		RunID:  "test-run",
+		Status: "success",
+	}
+	out := captureStdout(t, func() { printAuditHeader(r) })
+	if strings.Contains(out, "Bundle:") {
+		t.Errorf("Bundle: line should not appear when identity empty:\n%s", out)
+	}
+}
+
 // TestPrintRunList_BundleColumn verifies the Bundle column shows the truncated
 // sha256 identity for runs from .dipx bundles, and stays empty for plain .dip
 // runs.

@@ -41,6 +41,10 @@ type AuditReport struct {
 	RestartCount int `json:"restart_count"`
 	// CheckpointTimestamp is the last checkpoint write time.
 	CheckpointTimestamp time.Time `json:"checkpoint_timestamp"`
+	// BundleIdentity is the content-addressed identity ("sha256:<hex>") of
+	// the .dipx bundle the run was executed against. Read from the run's
+	// checkpoint. Empty for runs from a plain .dip file.
+	BundleIdentity string `json:"bundle_identity,omitempty"`
 }
 
 // TimelineEntry is a single entry in the audit timeline.
@@ -131,6 +135,7 @@ func Audit(ctx context.Context, runDir string) (*AuditReport, error) {
 		CompletedNodes:      len(cp.CompletedNodes),
 		RestartCount:        cp.RestartCount,
 		CheckpointTimestamp: cp.Timestamp,
+		BundleIdentity:      cp.BundleIdentity,
 	}
 	if len(activity) >= 2 {
 		r.TotalDuration = activity[len(activity)-1].Timestamp.Sub(activity[0].Timestamp)

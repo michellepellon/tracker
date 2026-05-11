@@ -171,6 +171,54 @@ func TestListRuns_PopulatesBundleIdentity(t *testing.T) {
 	}
 }
 
+func TestAudit_PopulatesBundleIdentityFromCheckpoint(t *testing.T) {
+	workdir := t.TempDir()
+	runDir := filepath.Join(workdir, ".tracker", "runs", "audit-bundle-test")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cp := &pipeline.Checkpoint{
+		RunID:          "audit-bundle-test",
+		BundleIdentity: "sha256:audit_test_identity",
+		Timestamp:      time.Now(),
+	}
+	if err := pipeline.SaveCheckpoint(cp, filepath.Join(runDir, "checkpoint.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Audit(context.Background(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.BundleIdentity != "sha256:audit_test_identity" {
+		t.Errorf("AuditReport.BundleIdentity = %q, want %q", report.BundleIdentity, "sha256:audit_test_identity")
+	}
+}
+
+func TestAudit_EmptyBundleIdentity_ForPlainDipRuns(t *testing.T) {
+	workdir := t.TempDir()
+	runDir := filepath.Join(workdir, ".tracker", "runs", "plain-dip-audit")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cp := &pipeline.Checkpoint{
+		RunID:     "plain-dip-audit",
+		Timestamp: time.Now(),
+		// BundleIdentity intentionally left empty (plain .dip)
+	}
+	if err := pipeline.SaveCheckpoint(cp, filepath.Join(runDir, "checkpoint.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Audit(context.Background(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.BundleIdentity != "" {
+		t.Errorf("AuditReport.BundleIdentity should be empty for plain .dip run, got %q", report.BundleIdentity)
+	}
+}
+
 func TestListRuns_EmptyBundleIdentity_ForPlainDipRuns(t *testing.T) {
 	workdir := t.TempDir()
 	runDir := filepath.Join(workdir, ".tracker", "runs", "plain-dip-run")

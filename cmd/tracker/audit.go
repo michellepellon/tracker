@@ -98,6 +98,9 @@ func printAuditHeader(r *tracker.AuditReport) {
 	fmt.Println()
 	fmt.Println("\u2550\u2550\u2550 Audit Report \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550")
 	fmt.Printf("  Run ID:    %s\n", r.RunID)
+	if r.BundleIdentity != "" {
+		fmt.Printf("  Bundle:    %s\n", r.BundleIdentity)
+	}
 	fmt.Printf("  Status:    %s\n", r.Status)
 	fmt.Printf("  Nodes:     %d completed\n", r.CompletedNodes)
 	fmt.Printf("  Restarts:  %d\n", r.RestartCount)
