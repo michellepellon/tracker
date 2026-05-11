@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/2389-research/dippin-lang/dipx"
+	"github.com/2389-research/dippin-lang/validator"
 )
 
 // BundleInfo carries the metadata extracted from a loaded .dipx bundle.
@@ -42,7 +43,7 @@ func LoadDipxBundle(ctx context.Context, path string) (*Graph, map[string]*Graph
 
 	entry := bundle.Entry()
 	entryGraph, diags, err := LoadDippinWorkflowFromIR(entry, manifest.Entry)
-	for _, d := range diags {
+	for _, d := range filterBundleLintNoise(diags) {
 		fmt.Fprintln(os.Stderr, d.String())
 	}
 	if err != nil {
@@ -62,7 +63,7 @@ func LoadDipxBundle(ctx context.Context, path string) (*Graph, map[string]*Graph
 			return nil, nil, BundleInfo{}, fmt.Errorf("load bundle %s: lookup %s: %w", path, file.Path, err)
 		}
 		sub, subDiags, err := LoadDippinWorkflowFromIR(wf, file.Path)
-		for _, d := range subDiags {
+		for _, d := range filterBundleLintNoise(subDiags) {
 			fmt.Fprintln(os.Stderr, d.String())
 		}
 		if err != nil {
@@ -81,6 +82,23 @@ func LoadDipxBundle(ctx context.Context, path string) (*Graph, map[string]*Graph
 		Manifest:  manifest,
 	}
 	return entryGraph, subgraphs, info, nil
+}
+
+// filterBundleLintNoise drops diagnostics that don't apply when the source is
+// a sealed .dipx bundle. Currently strips DIP126 ("subgraph ref file does not
+// exist") — dippin's lint does an os.Stat on the bundle-relative path (e.g.,
+// "workflows/sub.dip"), but bundled subgraphs live inside the ZIP and dipx.Open
+// has already verified ref closure for us. Without this filter every load of a
+// bundle with subgraphs would print a misleading "does not exist" warning.
+func filterBundleLintNoise(diags []validator.Diagnostic) []validator.Diagnostic {
+	out := make([]validator.Diagnostic, 0, len(diags))
+	for _, d := range diags {
+		if d.Code == validator.DIP126 {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // canonicalizeSubgraphRefs rewrites every subgraph_ref attr on g from the

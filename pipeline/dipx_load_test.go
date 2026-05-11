@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,6 +192,67 @@ func TestLoadDipxBundle_WithSubgraph(t *testing.T) {
 	}
 	if !foundRef {
 		t.Error("expected at least one node with a subgraph_ref attr; found none")
+	}
+}
+
+// TestLoadDipxBundle_SuppressesDIP126 confirms that the bundle loader filters
+// out dippin's DIP126 lint warning ("subgraph ref file does not exist") on
+// every load. The warning is misleading for bundles — the file IS in the ZIP
+// and dipx.Open has already verified ref closure, but dippin's lint calls
+// os.Stat on a bundle-relative path that has no on-disk counterpart.
+func TestLoadDipxBundle_SuppressesDIP126(t *testing.T) {
+	dir := t.TempDir()
+	subPath := filepath.Join(dir, "sub.dip")
+	if err := os.WriteFile(subPath, []byte(dipxtest.MinimalDip("sub_wf_dip126", "s_start", "s_exit")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entryPath := filepath.Join(dir, "entry.dip")
+	entrySource := `workflow entry_with_sub_dip126
+  start: a
+  exit: c
+
+  agent a
+    label: "Start"
+
+  subgraph b
+    ref: sub.dip
+
+  agent c
+    label: "Exit"
+
+  edges
+    a -> b
+    b -> c
+`
+	if err := os.WriteFile(entryPath, []byte(entrySource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := dipxtest.PackTestBundle(t, entryPath)
+
+	// Capture stderr during the load.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = oldStderr })
+
+	_, _, _, loadErr := LoadDipxBundle(context.Background(), bundlePath)
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stderr pipe writer: %v", err)
+	}
+	captured, readErr := io.ReadAll(r)
+	if readErr != nil {
+		t.Fatalf("read captured stderr: %v", readErr)
+	}
+
+	if loadErr != nil {
+		t.Fatalf("LoadDipxBundle: %v", loadErr)
+	}
+	if strings.Contains(string(captured), "DIP126") {
+		t.Errorf("DIP126 should be suppressed for bundle loads; got stderr: %s", captured)
 	}
 }
 

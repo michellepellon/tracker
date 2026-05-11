@@ -828,11 +828,18 @@ func checkPipelineFile(pipelineFile string) CheckResult {
 		}
 		return out
 	}
+	// .dipx bundles are ZIP archives produced by `dippin pack`, not text source.
+	// dispatch through LoadDipxBundle so dipx.Open can verify the manifest and
+	// every embedded workflow before we report success. parsePipelineSource
+	// below would choke on the ZIP bytes if we fell through.
+	if strings.EqualFold(filepath.Ext(pipelineFile), ".dipx") {
+		return checkPipelineBundle(pipelineFile)
+	}
 	hasWarn := false
 	if !strings.HasSuffix(pipelineFile, ".dip") && !strings.HasSuffix(pipelineFile, ".dot") {
 		out.Details = append(out.Details, CheckDetail{
 			Status:  CheckStatusWarn,
-			Message: fmt.Sprintf("%s is not a .dip or .dot file — may not be a valid pipeline", pipelineFile),
+			Message: fmt.Sprintf("%s is not a .dip, .dot, or .dipx file — may not be a valid pipeline", pipelineFile),
 		})
 		hasWarn = true
 	}
@@ -897,6 +904,30 @@ func checkPipelineFile(pipelineFile string) CheckResult {
 		out.Status = CheckStatusOK
 		out.Message = fmt.Sprintf("%s is valid", pipelineFile)
 	}
+	return out
+}
+
+// checkPipelineBundle handles the .dipx branch of checkPipelineFile. It loads
+// the bundle via pipeline.LoadDipxBundle, which verifies SHA-256 hashes and
+// converts every embedded workflow. A successful load is sufficient evidence
+// that the bundle parses and has a valid shape — doctor does not need to run
+// the pipeline.
+func checkPipelineBundle(bundlePath string) CheckResult {
+	out := CheckResult{Name: "Pipeline File"}
+	entry, subgraphs, info, err := pipeline.LoadDipxBundle(context.Background(), bundlePath)
+	if err != nil {
+		out.Status = CheckStatusError
+		out.Message = fmt.Sprintf("%s: bundle load failed: %v", bundlePath, err)
+		out.Hint = "run `tracker validate " + bundlePath + "` for full details"
+		return out
+	}
+	out.Details = append(out.Details, CheckDetail{
+		Status: CheckStatusOK,
+		Message: fmt.Sprintf("%s valid (%d nodes, %d edges, %d subgraph(s), identity %s)",
+			bundlePath, len(entry.Nodes), len(entry.Edges), len(subgraphs), info.Identity),
+	})
+	out.Status = CheckStatusOK
+	out.Message = fmt.Sprintf("%s is valid", bundlePath)
 	return out
 }
 
