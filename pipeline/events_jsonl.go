@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -237,6 +238,59 @@ func (h *JSONLEventHandler) WriteLLMEvent(kind, provider, model, toolName, previ
 		entry.BundleIdentity = h.bundleIdentity
 	}
 	h.writeEntry(entry)
+}
+
+// WriteBundleMismatchForced records a forced bundle-identity override on
+// resume. Called once at run-start (before the engine fires any pipeline
+// events) when --force-bundle-mismatch allowed resume despite a mismatch
+// between the checkpoint's stored identity and the current bundle's
+// identity. Both identities are preserved in the log entry so post-hoc
+// auditors can see what was overridden.
+//
+// The entry's bundle_identity field is stamped with the CURRENT identity
+// (what the run actually executes against), so post-hoc scans grouping
+// activity.jsonl lines by bundle see this override clustered with the
+// rest of the run.
+//
+// runID is needed to open the activity log file lazily — this is the
+// first event the handler ever writes, so the file isn't open yet
+// (HandlePipelineEvent's lazy openFile hasn't run). Pass the resume run
+// ID here.
+func (h *JSONLEventHandler) WriteBundleMismatchForced(runID, originalIdentity, currentIdentity string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.file == nil && runID != "" {
+		_ = h.openFile(runID)
+	}
+	if h.file == nil {
+		return
+	}
+
+	entry := jsonlLogEntry{
+		Timestamp:      time.Now().Format("2006-01-02T15:04:05.000Z07:00"),
+		Source:         "cli",
+		Type:           string(EventBundleMismatchForced),
+		RunID:          runID,
+		BundleIdentity: currentIdentity,
+		Message: fmt.Sprintf(
+			"bundle identity mismatch forced via --force-bundle-mismatch (original: %s, current: %s)",
+			displayIdentityForLog(originalIdentity),
+			displayIdentityForLog(currentIdentity),
+		),
+	}
+	h.writeEntry(entry)
+}
+
+// displayIdentityForLog formats an identity for inclusion in a log message.
+// Duplicates cmd/tracker/resume_bundle.go:displayIdentity because they're in
+// different packages — both surfaces need the same human-friendly "(none —
+// plain .dip)" rendering for empty identities.
+func displayIdentityForLog(id string) string {
+	if id == "" {
+		return "(none — plain .dip)"
+	}
+	return id
 }
 
 // writeEntry marshals and writes a log entry. Caller must hold h.mu.

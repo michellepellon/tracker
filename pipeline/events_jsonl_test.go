@@ -479,6 +479,99 @@ func TestJSONLEventHandler_PreservesCallerSetBundleIdentity(t *testing.T) {
 	}
 }
 
+// TestJSONLEventHandler_WriteBundleMismatchForced pins the contract that
+// the bundle_mismatch_forced audit entry lands in activity.jsonl with the
+// correct shape — source=cli, type=bundle_mismatch_forced, bundle_identity
+// stamped with the CURRENT identity (what the run actually executes
+// against, not the original checkpoint identity), and a message preserving
+// both identities for post-hoc forensics.
+func TestJSONLEventHandler_WriteBundleMismatchForced(t *testing.T) {
+	dir := t.TempDir()
+	h := NewJSONLEventHandler(dir)
+
+	originalID := "sha256:" + strings.Repeat("a", 64)
+	currentID := "sha256:" + strings.Repeat("b", 64)
+	h.WriteBundleMismatchForced("force-run", originalID, currentID)
+	h.Close()
+
+	data, err := os.ReadFile(filepath.Join(dir, "force-run", "activity.jsonl"))
+	if err != nil {
+		t.Fatalf("read activity log: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		t.Fatalf("not valid JSON: %v\nline: %s", err, line)
+	}
+
+	if entry["type"] != "bundle_mismatch_forced" {
+		t.Errorf("type = %v, want bundle_mismatch_forced", entry["type"])
+	}
+	if entry["source"] != "cli" {
+		t.Errorf("source = %v, want cli", entry["source"])
+	}
+	if entry["run_id"] != "force-run" {
+		t.Errorf("run_id = %v, want force-run", entry["run_id"])
+	}
+	if entry["bundle_identity"] != currentID {
+		t.Errorf("bundle_identity should be the CURRENT identity (what the run actually uses): got %v, want %s", entry["bundle_identity"], currentID)
+	}
+	msg, _ := entry["message"].(string)
+	if !strings.Contains(msg, originalID) || !strings.Contains(msg, currentID) {
+		t.Errorf("message should contain both identities: %q", msg)
+	}
+	if !strings.Contains(msg, "--force-bundle-mismatch") {
+		t.Errorf("message should mention --force-bundle-mismatch: %q", msg)
+	}
+}
+
+// TestJSONLEventHandler_WriteBundleMismatchForced_EmptyOriginal pins that
+// a plain-.dip-to-.dipx upgrade (empty original identity, populated current)
+// renders the original side as "(none — plain .dip)" so the audit trail
+// can distinguish "no bundle was claimed" from "wrong bundle".
+func TestJSONLEventHandler_WriteBundleMismatchForced_EmptyOriginal(t *testing.T) {
+	dir := t.TempDir()
+	h := NewJSONLEventHandler(dir)
+
+	currentID := "sha256:" + strings.Repeat("c", 64)
+	h.WriteBundleMismatchForced("upgrade-run", "", currentID)
+	h.Close()
+
+	data, err := os.ReadFile(filepath.Join(dir, "upgrade-run", "activity.jsonl"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	msg, _ := entry["message"].(string)
+	if !strings.Contains(msg, "(none — plain .dip)") {
+		t.Errorf("empty original should render as plain-.dip marker: %q", msg)
+	}
+	if !strings.Contains(msg, currentID) {
+		t.Errorf("message should still contain current id: %q", msg)
+	}
+}
+
+// TestJSONLEventHandler_WriteBundleMismatchForced_NoOpWithoutRunID pins the
+// no-op behavior when the caller can't supply a run ID (the file path is
+// derived from the run ID, so we have no destination otherwise). Matches
+// HandlePipelineEvent's defensive guard for events without RunID.
+func TestJSONLEventHandler_WriteBundleMismatchForced_NoOpWithoutRunID(t *testing.T) {
+	dir := t.TempDir()
+	h := NewJSONLEventHandler(dir)
+
+	h.WriteBundleMismatchForced("", "sha256:aa", "sha256:bb")
+	h.Close()
+
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Errorf("expected no files without RunID, got %d", len(entries))
+	}
+}
+
 type testErr struct{ msg string }
 
 func (e *testErr) Error() string { return e.msg }

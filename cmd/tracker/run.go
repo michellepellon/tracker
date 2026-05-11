@@ -76,6 +76,13 @@ var activeArtifactDir string
 // (denylist active, no allowlist, 10MB ceiling).
 var activeToolSafety handlers.ToolHandlerConfig
 
+// activeResumeInfo carries resume-time metadata from resolveRunCheckpoint
+// through to run/runTUI. The forced-mismatch detail in particular has to
+// reach the activity log handler (constructed inside run/runTUI) so the
+// override can be recorded as a bundle_mismatch_forced entry before the
+// engine fires. The zero value is the new (non-resume) run case.
+var activeResumeInfo resumeInfo
+
 // webhookGateCfg holds just the webhook gate settings needed by chooseInterviewer.
 type webhookGateCfg struct {
 	webhookURL        string
@@ -153,6 +160,13 @@ func run(pipelineFile, workdir, checkpoint, format, backend string, verbose bool
 	// plain .dip runs.
 	activityLog.SetBundleIdentity(bundleInfo.Identity)
 
+	// If this resume only proceeded because --force-bundle-mismatch was
+	// passed, record the override in activity.jsonl now — the engine
+	// hasn't fired yet, so without this the audit trail would lack the
+	// signal that the run executed against a different bundle than its
+	// checkpoint claimed. No-op when no resume / no forced mismatch.
+	emitForcedBundleMismatch(activityLog, activeResumeInfo)
+
 	wireLLMTraceToLog(llmClient, activityLog)
 
 	agentEventHandler, pipelineEventHandler := buildConsoleEventHandlers(
@@ -200,6 +214,17 @@ func prepareNativeLLMClient(tokenTracker *llm.TokenTracker, backend string) (*ll
 		return nil, nil
 	}
 	return client, nil
+}
+
+// emitForcedBundleMismatch writes the bundle_mismatch_forced audit entry to
+// activity.jsonl when --force-bundle-mismatch allowed resume despite a
+// .dipx bundle identity change. No-op for new runs and for resumes whose
+// bundle identity matched (the common case).
+func emitForcedBundleMismatch(activityLog *pipeline.JSONLEventHandler, info resumeInfo) {
+	if !info.BundleMismatchForced {
+		return
+	}
+	activityLog.WriteBundleMismatchForced(info.RunID, info.OriginalIdentity, info.CurrentIdentity)
 }
 
 // wireLLMTraceToLog registers a trace observer that writes LLM events to the activity log.
@@ -401,6 +426,13 @@ func runTUI(pipelineFile, workdir, checkpoint, format, backend string, verbose b
 	// registry's BundleIdentityStamper). Empty identity is a no-op for
 	// plain .dip runs.
 	activityLog.SetBundleIdentity(bundleInfo.Identity)
+
+	// If this resume only proceeded because --force-bundle-mismatch was
+	// passed, record the override in activity.jsonl now — the engine
+	// hasn't fired yet, so without this the audit trail would lack the
+	// signal that the run executed against a different bundle than its
+	// checkpoint claimed. No-op when no resume / no forced mismatch.
+	emitForcedBundleMismatch(activityLog, activeResumeInfo)
 
 	sendFn := tui.SendFunc(func(msg tea.Msg) { prog.Send(msg) })
 	interviewer := chooseTUIInterviewer(sendFn, activeAutopilotCfg, llmClient, backend)

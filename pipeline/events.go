@@ -34,10 +34,11 @@ const (
 	EventCostUpdated    PipelineEventType = "cost_updated"
 	EventBudgetExceeded PipelineEventType = "budget_exceeded"
 
-	// EventBundleMismatchForced is emitted when resume proceeds despite a
-	// bundle-identity mismatch because --force-bundle-mismatch was set. It
-	// records the override in activity.jsonl for post-hoc audit.
-	// TODO(task-16): wire the actual emission via the engine after construction in resolveRunCheckpoint.
+	// EventBundleMismatchForced is emitted to activity.jsonl when resume
+	// proceeds despite a bundle-identity mismatch because --force-bundle-mismatch
+	// was set. Records both the original (checkpoint) and current identities
+	// in the entry's Message field for post-hoc audit. Emitted once per run by
+	// JSONLEventHandler.WriteBundleMismatchForced before any engine work begins.
 	EventBundleMismatchForced PipelineEventType = "bundle_mismatch_forced"
 )
 

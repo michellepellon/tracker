@@ -302,12 +302,19 @@ func executeRun(cfg runConfig, deps commandDeps) error {
 
 	printStartupBanner()
 
-	checkpoint, err := resolveRunCheckpoint(cfg)
+	resume, err := resolveRunCheckpoint(cfg)
 	if err != nil {
 		return err
 	}
 
-	return selectAndRunMode(cfg, deps, checkpoint)
+	// Stash the forced-mismatch detail so run/runTUI can write the audit
+	// entry to activity.jsonl once the JSONLEventHandler is constructed.
+	// commandDeps.run / commandDeps.runTUI have fixed signatures (see the
+	// activeAutopilotCfg comment above), so the override flows through a
+	// package var rather than a new parameter.
+	activeResumeInfo = resume
+
+	return selectAndRunMode(cfg, deps, resume.CheckpointPath)
 }
 
 // printRunPreamble prints backend and autopilot status messages and validates persona.
@@ -358,41 +365,84 @@ func printToolSafetyPreamble(cfg runConfig) {
 	}
 }
 
-// resolveRunCheckpoint returns the checkpoint path for a resume run, or "" for new runs.
+// resumeInfo carries the resolved checkpoint path plus any bundle-identity
+// override detail that must be threaded through to the activity log once it
+// has been constructed (see run/runTUI). The zero value represents a new
+// (non-resume) run.
+type resumeInfo struct {
+	// CheckpointPath is the absolute path to the checkpoint.json for the
+	// resumed run, or empty for new runs.
+	CheckpointPath string
+
+	// RunID is the run identifier whose checkpoint was loaded. Threaded
+	// through so the activity log handler can open the correct
+	// <artifactDir>/<runID>/activity.jsonl when emitting the
+	// bundle_mismatch_forced event before the engine fires.
+	RunID string
+
+	// BundleMismatchForced is true when verifyResumeBundle would have
+	// rejected the resume on identity grounds but cfg.forceBundleMismatch
+	// allowed it through. Drives the bundle_mismatch_forced audit entry.
+	BundleMismatchForced bool
+
+	// OriginalIdentity is the .dipx bundle identity stored in the
+	// checkpoint at run-start ("sha256:<hex>" or "" for plain .dip).
+	OriginalIdentity string
+
+	// CurrentIdentity is the .dipx bundle identity of the pipeline source
+	// the resume is being run against ("sha256:<hex>" or "" for plain .dip).
+	CurrentIdentity string
+}
+
+// resolveRunCheckpoint returns resume metadata (checkpoint path + bundle
+// identity detail) for a resume run. Returns a zero-valued resumeInfo for
+// new (non-resume) runs.
 //
 // For resumes, it also verifies the checkpoint's stored bundle identity
 // against the current pipeline source. Any mismatch (including .dipx-to-.dip
 // downgrades and .dip-to-.dipx upgrades) aborts the resume unless the user
-// explicitly passes --force-bundle-mismatch.
-func resolveRunCheckpoint(cfg runConfig) (string, error) {
+// explicitly passes --force-bundle-mismatch. When --force-bundle-mismatch
+// allows a mismatch through, the returned resumeInfo carries the original
+// and current identities so the caller can record the override in the
+// activity log via JSONLEventHandler.WriteBundleMismatchForced once that
+// handler has been constructed.
+func resolveRunCheckpoint(cfg runConfig) (resumeInfo, error) {
 	if cfg.resumeID == "" {
-		return "", nil
+		return resumeInfo{}, nil
 	}
 	cpPath, err := resolveCheckpoint(cfg.workdir, cfg.resumeID)
 	if err != nil {
-		return "", err
+		return resumeInfo{}, err
 	}
 
 	cp, err := pipeline.LoadCheckpoint(cpPath)
 	if err != nil {
-		return "", fmt.Errorf("load checkpoint for bundle verification: %w", err)
+		return resumeInfo{}, fmt.Errorf("load checkpoint for bundle verification: %w", err)
 	}
 
 	currentIdentity, err := currentBundleIdentity(cfg.pipelineFile)
 	if err != nil {
-		return "", err
+		return resumeInfo{}, err
 	}
 
 	if err := verifyResumeBundle(cp.BundleIdentity, currentIdentity, cfg.forceBundleMismatch); err != nil {
-		return "", err
+		return resumeInfo{}, err
+	}
+
+	info := resumeInfo{
+		CheckpointPath:   cpPath,
+		RunID:            cp.RunID,
+		OriginalIdentity: cp.BundleIdentity,
+		CurrentIdentity:  currentIdentity,
 	}
 
 	if cp.BundleIdentity != currentIdentity && cfg.forceBundleMismatch {
+		info.BundleMismatchForced = true
 		fmt.Fprintf(os.Stderr, "WARNING: bundle identity mismatch forced via --force-bundle-mismatch\n  original: %s\n  current:  %s\n",
 			displayIdentity(cp.BundleIdentity), displayIdentity(currentIdentity))
 	}
 
-	return cpPath, nil
+	return info, nil
 }
 
 // currentBundleIdentity returns the content-addressed identity of the current
