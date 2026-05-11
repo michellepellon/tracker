@@ -170,6 +170,28 @@ func TestLoadDipxBundle_WithSubgraph(t *testing.T) {
 			t.Errorf("subgraph %q not marked DippinValidated", path)
 		}
 	}
+
+	// Critical assertion: every subgraph_ref in the entry graph must be the
+	// canonical bundle path (matching a key in the subgraphs map), not the
+	// author's source ref. Regression guard for the bug fixed when LoadDipxBundle
+	// started canonicalizing refs after IR-to-Graph conversion.
+	foundRef := false
+	for _, node := range graph.Nodes {
+		ref := node.Attrs["subgraph_ref"]
+		if ref == "" {
+			continue
+		}
+		foundRef = true
+		if _, ok := subgraphs[ref]; !ok {
+			t.Errorf("subgraph_ref %q on node %q not found in subgraphs map (keys: %v)", ref, node.ID, keys(subgraphs))
+		}
+		if !strings.HasPrefix(ref, "workflows/") {
+			t.Errorf("subgraph_ref %q on node %q should be canonical bundle path (start with workflows/)", ref, node.ID)
+		}
+	}
+	if !foundRef {
+		t.Error("expected at least one node with a subgraph_ref attr; found none")
+	}
 }
 
 // keys returns the keys of a map[string]*Graph for diagnostic output.
