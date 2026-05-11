@@ -146,6 +146,61 @@ func TestEngine_BundleIdentityEmptyByDefault(t *testing.T) {
 	}
 }
 
+// TestEngine_PersistsBundleIdentityToCheckpoint pins the contract that the
+// engine's configured bundleIdentity (via WithBundleIdentity) is written
+// into Checkpoint.BundleIdentity on every save. This is what Task 15's
+// strict-resume verification reads back to fail-fast on bundle drift.
+func TestEngine_PersistsBundleIdentityToCheckpoint(t *testing.T) {
+	g := NewGraph("bundle_id_persist_test")
+	g.AddNode(&Node{ID: "s", Shape: "Mdiamond", Label: "Start"})
+	g.AddNode(&Node{ID: "end", Shape: "Msquare", Label: "End"})
+	g.AddEdge(&Edge{From: "s", To: "end"})
+
+	reg := newTestRegistry()
+	cpPath := filepath.Join(t.TempDir(), "cp.json")
+	engine := NewEngine(g, reg,
+		WithCheckpointPath(cpPath),
+		WithBundleIdentity("sha256:bundleid_test"),
+	)
+	if _, err := engine.Run(context.Background()); err != nil {
+		t.Fatalf("engine run failed: %v", err)
+	}
+
+	cp, err := LoadCheckpoint(cpPath)
+	if err != nil {
+		t.Fatalf("LoadCheckpoint: %v", err)
+	}
+	if cp.BundleIdentity != "sha256:bundleid_test" {
+		t.Errorf("BundleIdentity not persisted: got %q want %q", cp.BundleIdentity, "sha256:bundleid_test")
+	}
+}
+
+// TestEngine_OmitsBundleIdentity_WhenNotSet pins the no-op contract: an
+// engine constructed without WithBundleIdentity writes an empty
+// BundleIdentity into the checkpoint, so plain .dip runs do not pollute
+// checkpoint.json with a stray "bundle_identity" field.
+func TestEngine_OmitsBundleIdentity_WhenNotSet(t *testing.T) {
+	g := NewGraph("bundle_id_omit_test")
+	g.AddNode(&Node{ID: "s", Shape: "Mdiamond", Label: "Start"})
+	g.AddNode(&Node{ID: "end", Shape: "Msquare", Label: "End"})
+	g.AddEdge(&Edge{From: "s", To: "end"})
+
+	reg := newTestRegistry()
+	cpPath := filepath.Join(t.TempDir(), "cp.json")
+	engine := NewEngine(g, reg, WithCheckpointPath(cpPath))
+	if _, err := engine.Run(context.Background()); err != nil {
+		t.Fatalf("engine run failed: %v", err)
+	}
+
+	cp, err := LoadCheckpoint(cpPath)
+	if err != nil {
+		t.Fatalf("LoadCheckpoint: %v", err)
+	}
+	if cp.BundleIdentity != "" {
+		t.Errorf("BundleIdentity should be empty when not set: got %q", cp.BundleIdentity)
+	}
+}
+
 func TestEngineDiamondPipeline(t *testing.T) {
 	dot, err := os.ReadFile("testdata/diamond.dot")
 	if err != nil {
