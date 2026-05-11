@@ -48,7 +48,7 @@ them via `bundle.Entry()` / `bundle.Lookup(path)`. Tracker's role narrows to
 The single chokepoint stays `cmd/tracker/loading.go:loadPipeline()`. Add one
 detect-and-dispatch branch *before* the existing `os.ReadFile`:
 
-```
+```text
 loadPipeline(filename, formatOverride):
     if ext(filename) == ".dipx":
         return loadDipxPipeline(filename)        # NEW path
@@ -137,7 +137,7 @@ Plain `.dip` runs leave all four fields empty — backward compatible.
 
 ### First run: `tracker run sprint_runner_dr.dipx`
 
-```
+```text
 CLI args
   │
   ▼
@@ -184,7 +184,7 @@ BundleInfo travels up:
 
 ### Resume: `tracker -r aff6262f sprint_runner_dr.dipx`
 
-```
+```text
 resolveRunCheckpoint(cfg)                          cmd/tracker/commands.go
   │
   ├─► load Checkpoint from disk

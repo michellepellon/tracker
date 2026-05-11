@@ -5,6 +5,8 @@ package main
 import (
 	"errors"
 	"fmt"
+
+	"github.com/2389-research/tracker/internal/bundleid"
 )
 
 var errBundleIdentityMismatch = errors.New("bundle identity mismatch on resume")
@@ -23,19 +25,9 @@ func verifyResumeBundle(checkpointIdentity, currentIdentity string, force bool) 
 	if force {
 		return nil
 	}
-	return fmt.Errorf("%w\n  run was started against: %s\n  current bundle:          %s\nThe pipeline source has changed since this run was started. To resume against a different bundle, pass --force-bundle-mismatch.",
+	return fmt.Errorf("%w\n  run was started against: %s\n  current bundle:          %s\nThe pipeline source has changed since this run was started. To resume against a different bundle, pass --force-bundle-mismatch",
 		errBundleIdentityMismatch,
-		displayIdentity(checkpointIdentity),
-		displayIdentity(currentIdentity),
+		bundleid.DisplayForLog(checkpointIdentity),
+		bundleid.DisplayForLog(currentIdentity),
 	)
-}
-
-// displayIdentity formats a bundle identity for human-readable error output.
-// An empty identity means the source was a plain .dip file (no content-
-// addressed identity); a non-empty value is shown as-is ("sha256:<hex>").
-func displayIdentity(id string) string {
-	if id == "" {
-		return "(none — plain .dip)"
-	}
-	return id
 }

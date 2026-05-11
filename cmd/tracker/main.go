@@ -43,8 +43,8 @@ type runConfig struct {
 	maxOutputLimit    int           // hard ceiling (bytes) on per-stream tool_command output; 0 = default 10MB
 	// forceBundleMismatch allows resume to proceed even when the .dipx
 	// bundle's content-addressed identity differs from the original run.
-	// Consumed by resume identity verification (Task 15); Task 14 only
-	// plumbs the flag — no behavior wiring yet.
+	// Consumed by resume identity verification to allow an explicit
+	// operator override when bundle identities differ.
 	forceBundleMismatch bool
 }
 

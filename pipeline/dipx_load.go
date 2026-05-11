@@ -109,6 +109,10 @@ func filterBundleLintNoise(diags []validator.Diagnostic) []validator.Diagnostic 
 // like validateSubgraphRefs and the subgraph handler can do direct lookups.
 func canonicalizeSubgraphRefs(g *Graph, bundle *dipx.Bundle, parentBundlePath string) error {
 	for _, node := range g.Nodes {
+		// subgraph_ref has no typed accessor on *pipeline.Node (yet); this
+		// matches the convention used elsewhere — pipeline/subgraph.go,
+		// cmd/tracker/loading.go:loadSubgraphsRecursive, cmd/tracker/nodes.go,
+		// and the manager_loop handler all read it directly via Attrs.
 		ref := node.Attrs["subgraph_ref"]
 		if ref == "" {
 			continue

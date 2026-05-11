@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/2389-research/tracker/internal/bundleid"
 )
 
 // jsonlLogEntry is the on-disk format for one activity log line.
@@ -275,22 +277,11 @@ func (h *JSONLEventHandler) WriteBundleMismatchForced(runID, originalIdentity, c
 		BundleIdentity: currentIdentity,
 		Message: fmt.Sprintf(
 			"bundle identity mismatch forced via --force-bundle-mismatch (original: %s, current: %s)",
-			displayIdentityForLog(originalIdentity),
-			displayIdentityForLog(currentIdentity),
+			bundleid.DisplayForLog(originalIdentity),
+			bundleid.DisplayForLog(currentIdentity),
 		),
 	}
 	h.writeEntry(entry)
-}
-
-// displayIdentityForLog formats an identity for inclusion in a log message.
-// Duplicates cmd/tracker/resume_bundle.go:displayIdentity because they're in
-// different packages — both surfaces need the same human-friendly "(none —
-// plain .dip)" rendering for empty identities.
-func displayIdentityForLog(id string) string {
-	if id == "" {
-		return "(none — plain .dip)"
-	}
-	return id
 }
 
 // writeEntry marshals and writes a log entry. Caller must hold h.mu.

@@ -176,6 +176,12 @@ func TestLoadDipxBundle_WithSubgraph(t *testing.T) {
 	// canonical bundle path (matching a key in the subgraphs map), not the
 	// author's source ref. Regression guard for the bug fixed when LoadDipxBundle
 	// started canonicalizing refs after IR-to-Graph conversion.
+	//
+	// Direct Attrs read intentional: this test verifies that
+	// canonicalizeSubgraphRefs rewrites the raw attribute value, so we must
+	// inspect it raw. subgraph_ref has no typed accessor on *pipeline.Node —
+	// the codebase consistently reads it via node.Attrs["subgraph_ref"]
+	// (see pipeline/subgraph.go, cmd/tracker/nodes.go, cmd/tracker/loading.go).
 	foundRef := false
 	for _, node := range graph.Nodes {
 		ref := node.Attrs["subgraph_ref"]

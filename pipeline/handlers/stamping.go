@@ -23,8 +23,14 @@ type BundleIdentityStamper struct {
 }
 
 func (s *BundleIdentityStamper) HandlePipelineEvent(evt pipeline.PipelineEvent) {
+	if s == nil {
+		return
+	}
 	if evt.BundleIdentity == "" {
 		evt.BundleIdentity = s.Identity
+	}
+	if s.Inner == nil {
+		return
 	}
 	s.Inner.HandlePipelineEvent(evt)
 }

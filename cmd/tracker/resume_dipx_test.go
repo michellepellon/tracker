@@ -221,17 +221,10 @@ func TestResolveRunCheckpoint_BundleMismatch_AllowedWithForce(t *testing.T) {
 
 	bundlePath, currentID := packBundleAndGetIdentity(t, "mismatch_forced")
 
-	// Quiet the stderr warning the function prints on forced mismatches so
-	// the test output stays clean. The warning content is exercised
-	// indirectly via the unit-level verifyResumeBundle tests above.
-	origStderr := os.Stderr
-	devnull, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open devnull: %v", err)
-	}
-	defer devnull.Close()
-	os.Stderr = devnull
-	defer func() { os.Stderr = origStderr }()
+	// resolveRunCheckpoint prints a forced-mismatch warning to stderr; the
+	// warning is informational and visible in test output. We assert on the
+	// returned resumeInfo, not on stderr — the unit-level verifyResumeBundle
+	// tests already exercise the error/warning string content directly.
 
 	cfg := runConfig{
 		workdir:             workdir,

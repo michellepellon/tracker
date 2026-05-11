@@ -89,8 +89,15 @@ func TestEngine_StampsBundleIdentityOnEmittedEvents(t *testing.T) {
 
 	reg := newTestRegistry()
 
+	// Guard against future concurrent emission paths: parallel/manager_loop
+	// handlers can fire events from goroutines, and the engine reserves the
+	// right to do so. This simple graph doesn't trigger that today, but the
+	// mutex keeps the test correct under `go test -race` if it ever does.
+	var capturedMu sync.Mutex
 	var captured []PipelineEvent
 	handler := PipelineEventHandlerFunc(func(evt PipelineEvent) {
+		capturedMu.Lock()
+		defer capturedMu.Unlock()
 		captured = append(captured, evt)
 	})
 
@@ -105,6 +112,8 @@ func TestEngine_StampsBundleIdentityOnEmittedEvents(t *testing.T) {
 	if result.Status != OutcomeSuccess {
 		t.Fatalf("expected success, got %q", result.Status)
 	}
+	capturedMu.Lock()
+	defer capturedMu.Unlock()
 	if len(captured) == 0 {
 		t.Fatal("no events captured — engine should at minimum emit started/completed")
 	}
@@ -127,8 +136,12 @@ func TestEngine_BundleIdentityEmptyByDefault(t *testing.T) {
 
 	reg := newTestRegistry()
 
+	// See TestEngine_StampsBundleIdentityOnEmittedEvents for rationale.
+	var capturedMu sync.Mutex
 	var captured []PipelineEvent
 	handler := PipelineEventHandlerFunc(func(evt PipelineEvent) {
+		capturedMu.Lock()
+		defer capturedMu.Unlock()
 		captured = append(captured, evt)
 	})
 
@@ -136,6 +149,8 @@ func TestEngine_BundleIdentityEmptyByDefault(t *testing.T) {
 	if _, err := engine.Run(context.Background()); err != nil {
 		t.Fatalf("engine run failed: %v", err)
 	}
+	capturedMu.Lock()
+	defer capturedMu.Unlock()
 	if len(captured) == 0 {
 		t.Fatal("no events captured")
 	}

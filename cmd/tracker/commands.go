@@ -13,6 +13,7 @@ import (
 
 	"github.com/2389-research/dippin-lang/dipx"
 	tracker "github.com/2389-research/tracker"
+	"github.com/2389-research/tracker/internal/bundleid"
 	"github.com/2389-research/tracker/pipeline"
 	"github.com/2389-research/tracker/pipeline/handlers"
 	"github.com/joho/godotenv"
@@ -231,14 +232,14 @@ func buildUnknownWorkflowError(name string) error {
 
 func executeValidate(cfg runConfig) error {
 	if cfg.pipelineFile == "" {
-		return fmt.Errorf("usage: tracker validate <pipeline.dip>")
+		return fmt.Errorf("usage: tracker validate <pipeline.dip|bundle.dipx>")
 	}
 	return runValidateCmd(cfg.pipelineFile, cfg.format, os.Stdout)
 }
 
 func executeSimulate(cfg runConfig) error {
 	if cfg.pipelineFile == "" {
-		return fmt.Errorf("usage: tracker simulate <pipeline.dip>")
+		return fmt.Errorf("usage: tracker simulate <pipeline.dip|bundle.dipx>")
 	}
 	return runSimulateCmd(cfg.pipelineFile, cfg.format, os.Stdout)
 }
@@ -439,7 +440,7 @@ func resolveRunCheckpoint(cfg runConfig) (resumeInfo, error) {
 	if cp.BundleIdentity != currentIdentity && cfg.forceBundleMismatch {
 		info.BundleMismatchForced = true
 		fmt.Fprintf(os.Stderr, "WARNING: bundle identity mismatch forced via --force-bundle-mismatch\n  original: %s\n  current:  %s\n",
-			displayIdentity(cp.BundleIdentity), displayIdentity(currentIdentity))
+			bundleid.DisplayForLog(cp.BundleIdentity), bundleid.DisplayForLog(currentIdentity))
 	}
 
 	return info, nil
