@@ -218,6 +218,20 @@ func (a *Adapter) processSSELine(data []byte, ch chan<- llm.StreamEvent, state *
 	}
 
 	if len(chunk.Candidates) == 0 {
+		// Some upstreams (notably the 2389 Bedrock Gateway) emit usageMetadata
+		// as a standalone trailing chunk after the finish chunk. Emit it as a
+		// usage-only EventFinish so the accumulator records it — processFinish
+		// merges Usage onto whatever finish reason the prior chunk set.
+		if chunk.UsageMetadata != nil {
+			ch <- llm.StreamEvent{
+				Type: llm.EventFinish,
+				Usage: &llm.Usage{
+					InputTokens:  chunk.UsageMetadata.PromptTokenCount,
+					OutputTokens: chunk.UsageMetadata.CandidatesTokenCount,
+					TotalTokens:  chunk.UsageMetadata.TotalTokenCount,
+				},
+			}
+		}
 		return false
 	}
 

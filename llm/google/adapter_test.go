@@ -521,6 +521,53 @@ func TestAdapterName(t *testing.T) {
 	}
 }
 
+// Some upstreams (notably the 2389 Bedrock Gateway) emit usageMetadata as
+// a standalone trailing SSE chunk after the finish chunk. Verify the
+// parser threads that into the final accumulated Usage instead of dropping
+// it on the floor.
+func TestAdapterStreamTrailingUsageChunk(t *testing.T) {
+	sseData := strings.Join([]string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"index":0}]}`,
+		"",
+		`data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}]}`,
+		"",
+		`data: {"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":4,"totalTokenCount":13}}`,
+		"",
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, sseData)
+	}))
+	defer server.Close()
+
+	a := New("test-key", WithBaseURL(server.URL))
+	ch := a.Stream(context.Background(), &llm.Request{
+		Model:    "gemini-2.5-pro",
+		Messages: []llm.Message{llm.UserMessage("Say ok")},
+	})
+
+	acc := llm.NewStreamAccumulator()
+	for evt := range ch {
+		acc.Process(evt)
+	}
+
+	resp := acc.Response()
+	if resp.Usage.InputTokens != 9 {
+		t.Errorf("expected InputTokens=9, got %d", resp.Usage.InputTokens)
+	}
+	if resp.Usage.OutputTokens != 4 {
+		t.Errorf("expected OutputTokens=4, got %d", resp.Usage.OutputTokens)
+	}
+	if resp.Usage.TotalTokens != 13 {
+		t.Errorf("expected TotalTokens=13, got %d", resp.Usage.TotalTokens)
+	}
+	if resp.FinishReason.Reason != "stop" {
+		t.Errorf("expected finish reason 'stop', got %q", resp.FinishReason.Reason)
+	}
+}
+
 func TestAdapterStreamToolCall(t *testing.T) {
 	sseData := strings.Join([]string{
 		`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"read_file","args":{"path":"test.go"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`,

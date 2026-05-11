@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gemini token usage no longer reports 0 when the upstream emits
+  `usageMetadata` as a standalone trailing SSE chunk.** Tracker's
+  `llm/google/adapter.go` SSE parser bailed on any chunk with no
+  `candidates` array, which dropped trailing usage-only chunks on the
+  floor — so `StreamAccumulator` only saw the candidate chunks (with no
+  usage attached) and the final `Usage{}` came out empty. Surfaced while
+  smoke-testing tracker against the [2389 Bedrock Gateway](https://github.com/2389-research/gateway)
+  where the gateway's `:streamGenerateContent?alt=sse` reply is three
+  chunks: text → `finishReason:"STOP"` → `usageMetadata`. The accumulator
+  contract already supports `processFinish` being called twice (first
+  sets `finishReason`, second updates `usage` without overwriting
+  reason), so the fix is a 10-line patch in `processSSELine`: when a
+  candidate-less chunk carries `UsageMetadata`, emit a usage-only
+  `EventFinish`. End-to-end verified against the live bedrock gateway —
+  a single-agent `provider: gemini` smoke run now reports
+  `1,408 in / 4 out` instead of `0 in / 0 out`, and tracker's
+  per-provider cost rollup is correct (no double-counting because
+  `AggregateUsage` folds per-node `SessionStats`, not per `TraceEvent`).
+  Net visible artifact: the `llm finish` trace line now prints twice on
+  affected gateways — first with `reason=stop` and no tokens, second
+  with `tokens=N/N` and no reason — but the final accumulated state is
+  correct. New regression test `TestAdapterStreamTrailingUsageChunk`
+  pins the trailing-chunk case end-to-end through
+  `StreamAccumulator.Response()`.
+
 ## [0.25.0] - 2026-05-05
 
 ### Added
