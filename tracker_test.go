@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -818,5 +819,57 @@ func TestRun_Config_BundleIdentity_EmptyByDefault(t *testing.T) {
 	}
 	if cp.BundleIdentity != "" {
 		t.Errorf("expected empty BundleIdentity on checkpoint, got %q", cp.BundleIdentity)
+	}
+}
+
+// TestRun_Config_BundleIdentity_WiresHandlerRegistry pins the contract that
+// Config.BundleIdentity is threaded through buildRegistry via
+// handlers.WithHandlerBundleIdentity, so handler-package emissions
+// (parallel/manager_loop bypass paths) carry identity when received by
+// cfg.EventHandler. Without this wiring, embedded integrations would see
+// unstamped EventStage* events on their handler — re-introducing the
+// bypass closed at the CLI in Task 7.
+//
+// Mirrors TestRegistryWrapBranch_FiresWhenIdentitySet but at the library
+// API surface: even with a minimal simpleDOT graph (no parallel node),
+// every event delivered to cfg.EventHandler must carry the identity if
+// the full stamping chain (engine + handler registry) is wired correctly.
+func TestRun_Config_BundleIdentity_WiresHandlerRegistry(t *testing.T) {
+	client := &stubCompleter{
+		response: &llm.Response{
+			Message:      llm.AssistantMessage("done"),
+			FinishReason: llm.FinishReason{Reason: "stop"},
+		},
+	}
+
+	var mu sync.Mutex
+	var captured []pipeline.PipelineEvent
+	handler := pipeline.PipelineEventHandlerFunc(func(evt pipeline.PipelineEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		captured = append(captured, evt)
+	})
+
+	want := "sha256:registry_wiring_test"
+	_, err := Run(context.Background(), simpleDOT, Config{
+		Format:         "dot",
+		LLMClient:      client,
+		CheckpointDir:  filepath.Join(t.TempDir(), "checkpoint.json"),
+		BundleIdentity: want,
+		EventHandler:   handler,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captured) == 0 {
+		t.Fatal("no events captured on cfg.EventHandler")
+	}
+	for _, evt := range captured {
+		if evt.BundleIdentity != want {
+			t.Errorf("event %v: BundleIdentity = %q, want %q", evt.Type, evt.BundleIdentity, want)
+		}
 	}
 }

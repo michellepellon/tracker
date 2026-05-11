@@ -60,20 +60,13 @@ type Config struct {
 	GatewayURL  string
 	WebhookGate *WebhookGateConfig // optional: post human gates to an HTTP webhook and wait for callback
 	// BundleIdentity is the content-addressed identity ("sha256:<hex>") of
-	// the .dipx bundle this run was loaded from. The CLI loader sets this
-	// automatically from the bundle on disk; library callers (embedded
-	// integrations like the Pipelines team's use case) can set it directly
-	// to thread provenance through Result, Checkpoint, and stamped events.
-	// Empty (the default) is a no-op and matches the behavior for plain
-	// .dip runs.
+	// the .dipx bundle this run was loaded from. Stamped onto every emitted
+	// PipelineEvent and persisted to the checkpoint for resume verification.
+	// Empty (the default) is a no-op and matches plain .dip behavior.
 	//
-	// When non-empty, the engine receives it via pipeline.WithBundleIdentity
-	// so every PipelineEvent the engine emits and every checkpoint save is
-	// stamped with the identity. The library API does not own the activity
-	// log (JSONLEventHandler) — callers that construct one separately
-	// should also call activityLog.SetBundleIdentity(cfg.BundleIdentity) so
-	// agent/llm events written outside the engine event chain carry the
-	// same provenance.
+	// Callers that build their own JSONLEventHandler should also call
+	// activityLog.SetBundleIdentity(cfg.BundleIdentity) so agent/llm writes
+	// outside the engine event chain carry the same provenance.
 	BundleIdentity string
 }
 
@@ -277,6 +270,9 @@ func buildRegistry(graph *pipeline.Graph, client *llm.Client, completer agent.Co
 	}
 	if cfg.EventHandler != nil {
 		registryOpts = append(registryOpts, handlers.WithPipelineEventHandler(cfg.EventHandler))
+	}
+	if cfg.BundleIdentity != "" {
+		registryOpts = append(registryOpts, handlers.WithHandlerBundleIdentity(cfg.BundleIdentity))
 	}
 	if cfg.Backend != "" {
 		registryOpts = append(registryOpts, handlers.WithDefaultBackend(cfg.Backend))
