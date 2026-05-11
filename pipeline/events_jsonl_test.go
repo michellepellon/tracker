@@ -316,6 +316,39 @@ func TestBuildLogEntry_NilCost(t *testing.T) {
 	}
 }
 
+// TestPipelineEvent_BundleIdentity_FlowsToJSONL pins the contract that the
+// engine's stamped BundleIdentity makes it onto every JSONL log entry —
+// this is how `.dipx` bundle provenance ends up on every line of
+// activity.jsonl.
+func TestPipelineEvent_BundleIdentity_FlowsToJSONL(t *testing.T) {
+	evt := PipelineEvent{
+		Type:           EventPipelineStarted,
+		Timestamp:      time.Unix(100, 0),
+		RunID:          "run-1",
+		BundleIdentity: "sha256:efb5648d28e6c2",
+	}
+	entry := buildLogEntry(evt)
+	if entry.BundleIdentity != "sha256:efb5648d28e6c2" {
+		t.Errorf("BundleIdentity not copied to jsonlLogEntry: got %q want %q", entry.BundleIdentity, "sha256:efb5648d28e6c2")
+	}
+}
+
+// TestPipelineEvent_BundleIdentity_OmittedWhenEmpty pins the JSON tag
+// behavior: plain .dip runs (empty identity) must not emit a
+// bundle_identity field at all, so external consumers can distinguish
+// bundle runs from non-bundle runs by field presence.
+func TestPipelineEvent_BundleIdentity_OmittedWhenEmpty(t *testing.T) {
+	evt := PipelineEvent{Type: EventPipelineStarted, Timestamp: time.Unix(100, 0), RunID: "run-1"}
+	entry := buildLogEntry(evt)
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "bundle_identity") {
+		t.Errorf("empty BundleIdentity should be omitted from JSON, got %s", string(data))
+	}
+}
+
 type testErr struct{ msg string }
 
 func (e *testErr) Error() string { return e.msg }

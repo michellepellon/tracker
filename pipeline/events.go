@@ -87,6 +87,12 @@ type PipelineEvent struct {
 	Err       error
 	Decision  *DecisionDetail // non-nil for decision audit trail events
 	Cost      *CostSnapshot   // non-nil for EventCostUpdated and EventBudgetExceeded events
+
+	// BundleIdentity is the content-addressed identity of the .dipx bundle
+	// the run was started against ("sha256:<hex>"). Empty for runs from a
+	// plain .dip file. The engine stamps this on every emitted event so
+	// activity.jsonl carries provenance on every line.
+	BundleIdentity string
 }
 
 // PipelineEventHandler receives pipeline events for observability purposes.

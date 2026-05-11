@@ -12,17 +12,18 @@ import (
 
 // jsonlLogEntry is the on-disk format for one activity log line.
 type jsonlLogEntry struct {
-	Timestamp string `json:"ts"`
-	Source    string `json:"source"` // "pipeline", "agent", "llm"
-	Type      string `json:"type"`
-	RunID     string `json:"run_id,omitempty"`
-	NodeID    string `json:"node_id,omitempty"`
-	Message   string `json:"message,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	Model     string `json:"model,omitempty"`
-	ToolName  string `json:"tool_name,omitempty"`
-	Content   string `json:"content,omitempty"`
+	Timestamp      string `json:"ts"`
+	Source         string `json:"source"` // "pipeline", "agent", "llm"
+	Type           string `json:"type"`
+	RunID          string `json:"run_id,omitempty"`
+	NodeID         string `json:"node_id,omitempty"`
+	Message        string `json:"message,omitempty"`
+	Error          string `json:"error,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	Model          string `json:"model,omitempty"`
+	ToolName       string `json:"tool_name,omitempty"`
+	Content        string `json:"content,omitempty"`
+	BundleIdentity string `json:"bundle_identity,omitempty"`
 
 	// Decision audit trail fields.
 	EdgeFrom        string            `json:"edge_from,omitempty"`
@@ -102,12 +103,13 @@ func (h *JSONLEventHandler) HandlePipelineEvent(evt PipelineEvent) {
 // buildLogEntry converts a PipelineEvent to a jsonlLogEntry.
 func buildLogEntry(evt PipelineEvent) jsonlLogEntry {
 	entry := jsonlLogEntry{
-		Timestamp: evt.Timestamp.Format("2006-01-02T15:04:05.000Z07:00"),
-		Source:    "pipeline",
-		Type:      string(evt.Type),
-		RunID:     evt.RunID,
-		NodeID:    evt.NodeID,
-		Message:   evt.Message,
+		Timestamp:      evt.Timestamp.Format("2006-01-02T15:04:05.000Z07:00"),
+		Source:         "pipeline",
+		Type:           string(evt.Type),
+		RunID:          evt.RunID,
+		NodeID:         evt.NodeID,
+		Message:        evt.Message,
+		BundleIdentity: evt.BundleIdentity,
 	}
 	if evt.Err != nil {
 		entry.Error = evt.Err.Error()

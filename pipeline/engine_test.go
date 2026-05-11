@@ -78,6 +78,74 @@ func TestEngineSimplePipeline(t *testing.T) {
 	}
 }
 
+// TestEngine_StampsBundleIdentityOnEmittedEvents pins the contract that
+// WithBundleIdentity stamps every PipelineEvent the engine emits. This is
+// how `.dipx` bundle provenance reaches every line of activity.jsonl.
+func TestEngine_StampsBundleIdentityOnEmittedEvents(t *testing.T) {
+	g := NewGraph("bundle_id_test")
+	g.AddNode(&Node{ID: "s", Shape: "Mdiamond", Label: "Start"})
+	g.AddNode(&Node{ID: "end", Shape: "Msquare", Label: "End"})
+	g.AddEdge(&Edge{From: "s", To: "end"})
+
+	reg := newTestRegistry()
+
+	var captured []PipelineEvent
+	handler := PipelineEventHandlerFunc(func(evt PipelineEvent) {
+		captured = append(captured, evt)
+	})
+
+	engine := NewEngine(g, reg,
+		WithBundleIdentity("sha256:abcdef0123"),
+		WithPipelineEventHandler(handler),
+	)
+	result, err := engine.Run(context.Background())
+	if err != nil {
+		t.Fatalf("engine run failed: %v", err)
+	}
+	if result.Status != OutcomeSuccess {
+		t.Fatalf("expected success, got %q", result.Status)
+	}
+	if len(captured) == 0 {
+		t.Fatal("no events captured — engine should at minimum emit started/completed")
+	}
+	for _, evt := range captured {
+		if evt.BundleIdentity != "sha256:abcdef0123" {
+			t.Errorf("event %s has wrong BundleIdentity: got %q want %q", evt.Type, evt.BundleIdentity, "sha256:abcdef0123")
+		}
+	}
+}
+
+// TestEngine_BundleIdentityEmptyByDefault pins the no-op contract: an
+// engine constructed without WithBundleIdentity emits events whose
+// BundleIdentity is the empty string, so plain .dip runs do not leak a
+// stray "bundle_identity" field into activity.jsonl.
+func TestEngine_BundleIdentityEmptyByDefault(t *testing.T) {
+	g := NewGraph("bundle_id_default_test")
+	g.AddNode(&Node{ID: "s", Shape: "Mdiamond", Label: "Start"})
+	g.AddNode(&Node{ID: "end", Shape: "Msquare", Label: "End"})
+	g.AddEdge(&Edge{From: "s", To: "end"})
+
+	reg := newTestRegistry()
+
+	var captured []PipelineEvent
+	handler := PipelineEventHandlerFunc(func(evt PipelineEvent) {
+		captured = append(captured, evt)
+	})
+
+	engine := NewEngine(g, reg, WithPipelineEventHandler(handler))
+	if _, err := engine.Run(context.Background()); err != nil {
+		t.Fatalf("engine run failed: %v", err)
+	}
+	if len(captured) == 0 {
+		t.Fatal("no events captured")
+	}
+	for _, evt := range captured {
+		if evt.BundleIdentity != "" {
+			t.Errorf("event %s has non-empty BundleIdentity without WithBundleIdentity: %q", evt.Type, evt.BundleIdentity)
+		}
+	}
+}
+
 func TestEngineDiamondPipeline(t *testing.T) {
 	dot, err := os.ReadFile("testdata/diamond.dot")
 	if err != nil {
