@@ -336,6 +336,38 @@ func (h *ToolHandler) execAndBuildOutcome(ctx context.Context, node *pipeline.No
 			pipeline.ContextKeyToolStderr: stderr,
 		},
 	}
+	// Surface truncation as structured outcome metadata so the engine can
+	// emit EventToolOutputTruncated and `tracker diagnose` can correlate
+	// routing misses with dropped output (issue #208). Tail-window capture
+	// preserves the routing-relevant trailing bytes; the event tells
+	// operators that earlier bytes were elided.
+	//
+	// Byte accounting reflects the *raw* (pre-trim) captured tail and
+	// dropped head — i.e., what the process actually emitted, not what
+	// ended up in ctx.tool_stdout / ctx.tool_stderr after TrimRight.
+	// This keeps the documented invariant from pipeline/events.go
+	// (TotalBytes = CapturedBytes + DroppedBytes) and matches the
+	// "how big was this stream" question operators ask. Trimming is a
+	// separate presentation concern for routing conditions; consumers
+	// that need the trimmed length can compute len(ctx.tool_stdout).
+	if result.StdoutTruncated {
+		outcome.Truncations = append(outcome.Truncations, pipeline.TruncationDetail{
+			Stream:        "stdout",
+			Limit:         outputLimit,
+			CapturedBytes: len(result.Stdout),
+			DroppedBytes:  result.StdoutBytesDropped,
+			TotalBytes:    len(result.Stdout) + result.StdoutBytesDropped,
+		})
+	}
+	if result.StderrTruncated {
+		outcome.Truncations = append(outcome.Truncations, pipeline.TruncationDetail{
+			Stream:        "stderr",
+			Limit:         outputLimit,
+			CapturedBytes: len(result.Stderr),
+			DroppedBytes:  result.StderrBytesDropped,
+			TotalBytes:    len(result.Stderr) + result.StderrBytesDropped,
+		})
+	}
 	if applyDeclaredWrites(node, outcome.ContextUpdates, stdout, "Tool stdout JSON") {
 		outcome.Status = pipeline.OutcomeFail
 	}

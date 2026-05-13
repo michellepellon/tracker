@@ -34,6 +34,23 @@ const (
 	EventCostUpdated    PipelineEventType = "cost_updated"
 	EventBudgetExceeded PipelineEventType = "budget_exceeded"
 
+	// EventToolOutputTruncated fires after a tool node when one or both of
+	// its output streams exceeded the per-stream cap and head bytes were
+	// elided. Carries TruncationDetail. Surfaced by `tracker diagnose` so
+	// operators can correlate routing mismatches with truncation (issue
+	// #208).
+	EventToolOutputTruncated PipelineEventType = "tool_output_truncated"
+
+	// EventConditionalFallthrough fires when at least one conditional
+	// outgoing edge from a node was evaluated, none matched, and routing
+	// fell through to an unconditional fallback. The runtime already
+	// emits per-condition results and a final decision_edge event, but
+	// this aggregating signal is what `tracker diagnose` correlates with
+	// EventToolOutputTruncated to surface "your routing marker may have
+	// been dropped" (issue #208). It does NOT fire on intentional
+	// unconditional-only routing.
+	EventConditionalFallthrough PipelineEventType = "conditional_fallthrough"
+
 	// EventBundleMismatchForced is emitted to activity.jsonl when resume
 	// proceeds despite a bundle-identity mismatch because --force-bundle-mismatch
 	// was set. Records both the original (checkpoint) and current identities
@@ -54,6 +71,15 @@ type CostSnapshot struct {
 	ProviderTotals map[string]ProviderUsage
 	WallElapsed    time.Duration
 	Estimated      bool
+}
+
+// ConditionEval records a single conditional edge whose condition
+// evaluated false during routing. Used as the payload of
+// EventConditionalFallthrough so diagnostics can show which routing
+// intents missed before the fallback fired.
+type ConditionEval struct {
+	EdgeTo    string `json:"edge_to"`
+	Condition string `json:"condition"`
 }
 
 // DecisionDetail carries structured data about a pipeline decision point.
@@ -82,18 +108,38 @@ type DecisionDetail struct {
 	// Session stats from handler outcome.
 	TokenInput  int `json:"token_input,omitempty"`
 	TokenOutput int `json:"token_output,omitempty"`
+
+	// ConditionsTried lists the conditional edges that were evaluated
+	// false on the way to a fallback selection. Populated only on
+	// EventConditionalFallthrough events. Each entry pairs the target
+	// node with the literal condition string so a diagnostics consumer
+	// can render "your routing intents X, Y, Z all missed" without
+	// re-evaluating expressions.
+	ConditionsTried []ConditionEval `json:"conditions_tried,omitempty"`
+}
+
+// TruncationDetail carries structured data about a tool-output truncation
+// event. Attached to PipelineEvent via the Truncation field when a tool
+// stream's tail-window cap was hit. Issue #208.
+type TruncationDetail struct {
+	Stream        string `json:"stream"`         // "stdout" or "stderr"
+	Limit         int    `json:"limit"`          // per-stream cap in effect
+	CapturedBytes int    `json:"captured_bytes"` // bytes preserved in the captured tail
+	DroppedBytes  int    `json:"dropped_bytes"`  // bytes elided from the head
+	TotalBytes    int    `json:"total_bytes"`    // CapturedBytes + DroppedBytes for convenience
 }
 
 // PipelineEvent carries data about a single pipeline lifecycle occurrence.
 type PipelineEvent struct {
-	Type      PipelineEventType
-	Timestamp time.Time
-	RunID     string
-	NodeID    string
-	Message   string
-	Err       error
-	Decision  *DecisionDetail // non-nil for decision audit trail events
-	Cost      *CostSnapshot   // non-nil for EventCostUpdated and EventBudgetExceeded events
+	Type       PipelineEventType
+	Timestamp  time.Time
+	RunID      string
+	NodeID     string
+	Message    string
+	Err        error
+	Decision   *DecisionDetail   // non-nil for decision audit trail events
+	Cost       *CostSnapshot     // non-nil for EventCostUpdated and EventBudgetExceeded events
+	Truncation *TruncationDetail // non-nil for EventToolOutputTruncated
 
 	// BundleIdentity is the content-addressed identity of the .dipx bundle
 	// the run was started against ("sha256:<hex>"). Empty for runs from a

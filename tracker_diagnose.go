@@ -88,6 +88,14 @@ const (
 	SuggestionGoTest           SuggestionKind = "go_test"
 	SuggestionSuspiciousTiming SuggestionKind = "suspicious_timing"
 	SuggestionBudget           SuggestionKind = "budget"
+	// SuggestionToolOutputTruncated fires when a tool node's output stream
+	// exceeded its per-stream cap. Surfaces actionable copy pointing at
+	// output_limit and at the canonical authoring pattern. Issue #208.
+	SuggestionToolOutputTruncated SuggestionKind = "tool_output_truncated"
+	// SuggestionConditionalFallthrough fires when a node's conditional
+	// routing edges all evaluated false and routing fell back to an
+	// unconditional edge. Issue #208.
+	SuggestionConditionalFallthrough SuggestionKind = "conditional_fallthrough"
 )
 
 // Diagnose analyzes a run directory and returns a structured report.
@@ -119,14 +127,61 @@ func Diagnose(ctx context.Context, runDir string, opts ...DiagnoseConfig) (*Diag
 		CompletedNodes: len(cp.CompletedNodes),
 	}
 	failures := collectNodeFailures(runDir, logW)
-	halt, err := enrichFromActivity(ctx, runDir, failures, logW)
+	halt, anomalies, err := enrichFromActivity(ctx, runDir, failures, logW)
 	if err != nil {
 		return nil, err
 	}
 	report.BudgetHalt = halt
 	report.Failures = sortedFailures(failures)
-	report.Suggestions = buildSuggestions(report.Failures, report.BudgetHalt)
+	report.Suggestions = buildSuggestions(report.Failures, report.BudgetHalt, anomalies)
 	return report, nil
+}
+
+// runtimeAnomalies are non-failure events that nonetheless warrant a
+// surfaced suggestion in the diagnose report. Today: tool stdout/stderr
+// truncations (#208) and conditional-edge fallthroughs (#208 Tier 2).
+type runtimeAnomalies struct {
+	Truncations  []truncObservation
+	Fallthroughs []fallthroughObservation
+	// VisitStarts records per-node stage_started events so the
+	// suggestion builder can flush stale pending truncations from a
+	// prior visit as orphans before pairing within the new visit.
+	VisitStarts []visitBoundary
+}
+
+// Seq is a monotonically-increasing scan position shared across all
+// runtime anomaly observation types, assigned in chronological order
+// during the activity.jsonl scan. The suggestion builder uses it to
+// merge truncations, fallthroughs, and visit-boundary markers into a
+// single ordered stream so that loops/restarts don't mis-correlate a
+// truncation on visit N with a fallthrough on visit M.
+type truncObservation struct {
+	Seq           int
+	NodeID        string
+	Stream        string
+	Limit         int
+	CapturedBytes int
+	DroppedBytes  int
+	TotalBytes    int
+}
+
+type fallthroughObservation struct {
+	Seq             int
+	NodeID          string
+	EdgeTo          string
+	ConditionsTried []pipeline.ConditionEval
+}
+
+// visitBoundary marks a stage_started event for a node. The suggestion
+// builder uses these to flush any pending per-node truncations from a
+// prior visit as orphans before the new visit's events arrive — so two
+// back-to-back same-node truncations separated by a re-entry get
+// treated as two visits (one orphan + one new), while two back-to-back
+// truncations within the same visit (stdout + stderr both overflowed)
+// accumulate together and pair as a group with the visit's fallthrough.
+type visitBoundary struct {
+	Seq    int
+	NodeID string
 }
 
 // DiagnoseMostRecent finds the most recent run under workdir and diagnoses it.
@@ -209,35 +264,55 @@ type diagnoseEntry struct {
 	TotalTokens   int     `json:"total_tokens"`
 	TotalCostUSD  float64 `json:"total_cost_usd"`
 	WallElapsedMs int64   `json:"wall_elapsed_ms"`
+
+	// Truncation event fields (#208).
+	TruncStream   string `json:"trunc_stream"`
+	TruncLimit    int    `json:"trunc_limit"`
+	TruncCaptured int    `json:"trunc_captured_bytes"`
+	TruncDropped  int    `json:"trunc_dropped_bytes"`
+	TruncTotal    int    `json:"trunc_total_bytes"`
+
+	// Conditional-fallthrough event fields (#208).
+	EdgeTo          string                   `json:"edge_to"`
+	ConditionsTried []pipeline.ConditionEval `json:"conditions_tried"`
 }
 
 // enrichFromActivity streams activity.jsonl, populating failures + detecting
-// budget halt events. Returns (nil, nil) if activity.jsonl does not exist
-// (runs that never started). Returns ctx.Err() if cancellation fires
-// mid-parse, and scanner.Err() if the scanner aborts (buffer overflow at
-// 1 MB, I/O error) — both surface truncation to the caller so partial
-// analysis is never silently treated as authoritative.
-func enrichFromActivity(ctx context.Context, runDir string, failures map[string]*NodeFailure, logW io.Writer) (*BudgetHalt, error) {
+// budget halt events and runtime anomalies (tool-output truncations,
+// conditional fallthroughs). Returns (nil, runtimeAnomalies{}, nil) if
+// activity.jsonl does not exist (runs that never started). Returns
+// ctx.Err() if cancellation fires mid-parse, and scanner.Err() if the
+// scanner aborts (buffer overflow at 1 MB, I/O error) — both surface
+// truncation to the caller so partial analysis is never silently treated
+// as authoritative.
+func enrichFromActivity(ctx context.Context, runDir string, failures map[string]*NodeFailure, logW io.Writer) (*BudgetHalt, runtimeAnomalies, error) {
 	path := filepath.Join(runDir, "activity.jsonl")
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, runtimeAnomalies{}, nil
 		}
-		return nil, fmt.Errorf("open activity log: %w", err)
+		return nil, runtimeAnomalies{}, fmt.Errorf("open activity log: %w", err)
 	}
 	defer f.Close()
 
 	stageStarts := map[string]time.Time{}
 	failSignatures := map[string][]string{}
 	var halt *BudgetHalt
+	var anomalies runtimeAnomalies
+	// anomalySeq increments on every truncation or fallthrough so the
+	// suggestion builder can merge the two slices into a single
+	// chronologically-ordered stream — required to correctly pair the
+	// truncation and fallthrough from the same node-visit when the
+	// pipeline loops through that node multiple times.
+	anomalySeq := 0
 
 	scanner := bufio.NewScanner(f)
 	// Match LoadActivityLog: allow 1 MB lines.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, runtimeAnomalies{}, err
 		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -247,22 +322,53 @@ func enrichFromActivity(ctx context.Context, runDir string, failures map[string]
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			continue
 		}
-		if entry.Type == "budget_exceeded" {
+		switch pipeline.PipelineEventType(entry.Type) {
+		case pipeline.EventBudgetExceeded:
 			halt = &BudgetHalt{
 				TotalTokens:   entry.TotalTokens,
 				TotalCostUSD:  entry.TotalCostUSD,
 				WallElapsedMs: entry.WallElapsedMs,
 				Message:       entry.Message,
 			}
+		case pipeline.EventToolOutputTruncated:
+			anomalySeq++
+			anomalies.Truncations = append(anomalies.Truncations, truncObservation{
+				Seq:           anomalySeq,
+				NodeID:        entry.NodeID,
+				Stream:        entry.TruncStream,
+				Limit:         entry.TruncLimit,
+				CapturedBytes: entry.TruncCaptured,
+				DroppedBytes:  entry.TruncDropped,
+				TotalBytes:    entry.TruncTotal,
+			})
+		case pipeline.EventConditionalFallthrough:
+			anomalySeq++
+			anomalies.Fallthroughs = append(anomalies.Fallthroughs, fallthroughObservation{
+				Seq:             anomalySeq,
+				NodeID:          entry.NodeID,
+				EdgeTo:          entry.EdgeTo,
+				ConditionsTried: entry.ConditionsTried,
+			})
+		case pipeline.EventStageStarted:
+			// Mark a visit boundary so the suggestion builder can flush
+			// pending truncations from a prior visit before pairing
+			// within the new visit.
+			if entry.NodeID != "" {
+				anomalySeq++
+				anomalies.VisitStarts = append(anomalies.VisitStarts, visitBoundary{
+					Seq:    anomalySeq,
+					NodeID: entry.NodeID,
+				})
+			}
 		}
 		enrichFromEntry(entry, failures, stageStarts, failSignatures)
 	}
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintf(logW, "warning: activity log scanner stopped at %s: %v\n", path, err)
-		return nil, fmt.Errorf("scan activity log: %w", err)
+		return nil, runtimeAnomalies{}, fmt.Errorf("scan activity log: %w", err)
 	}
 	applyRetryAnalysis(failures, failSignatures)
-	return halt, nil
+	return halt, anomalies, nil
 }
 
 func enrichFromEntry(entry diagnoseEntry, failures map[string]*NodeFailure, stageStarts map[string]time.Time, failSignatures map[string][]string) {
@@ -344,7 +450,7 @@ func sortedFailures(m map[string]*NodeFailure) []NodeFailure {
 	return out
 }
 
-func buildSuggestions(failures []NodeFailure, halt *BudgetHalt) []Suggestion {
+func buildSuggestions(failures []NodeFailure, halt *BudgetHalt, anomalies runtimeAnomalies) []Suggestion {
 	var out []Suggestion
 	for _, f := range failures {
 		out = append(out, suggestionsForNodeFailure(f)...)
@@ -354,6 +460,117 @@ func buildSuggestions(failures []NodeFailure, halt *BudgetHalt) []Suggestion {
 			Kind:    SuggestionBudget,
 			Message: "Raise the relevant --max-tokens, --max-cost, or --max-wall-time flag, or remove the Config.Budget value",
 		})
+	}
+	// Merge truncations, fallthroughs, and visit-start boundaries into a
+	// single Seq-ordered stream and walk it with a per-node state
+	// machine. Within one node-visit the order emitted by the engine
+	// is: stage_started → (tool runs) → 0..N truncation events (one per
+	// truncated stream — stdout and stderr can both fire if both
+	// overflowed the cap) → 0..1 fallthrough event. So:
+	//
+	//   - stage_started flushes any pending truncations on that node
+	//     (those were from a prior visit with no matching fallthrough).
+	//   - A truncation appends to the per-node pending list — multiple
+	//     truncations between visit boundaries are the same visit's
+	//     multi-stream overflow.
+	//   - A fallthrough pairs with ALL pending truncations on that node
+	//     in one combined suggestion (covering every truncated stream
+	//     for that visit), then clears the list.
+	//   - At end-of-stream, any leftover pending truncations emit as
+	//     standalone (no fallthrough was emitted on that visit).
+	//
+	// A fallthrough with no pending truncations emits standalone — a
+	// fallthrough can only pair with a *prior* truncation in the same
+	// visit (engine order guarantees this).
+	pending := map[string][]truncObservation{}
+	type combined struct {
+		seq int
+		tr  *truncObservation       // exactly one of tr / fb / vs is non-nil
+		fb  *fallthroughObservation //
+		vs  *visitBoundary          //
+	}
+	merged := make([]combined, 0, len(anomalies.Truncations)+len(anomalies.Fallthroughs)+len(anomalies.VisitStarts))
+	for i := range anomalies.Truncations {
+		t := &anomalies.Truncations[i]
+		merged = append(merged, combined{seq: t.Seq, tr: t})
+	}
+	for i := range anomalies.Fallthroughs {
+		f := &anomalies.Fallthroughs[i]
+		merged = append(merged, combined{seq: f.Seq, fb: f})
+	}
+	for i := range anomalies.VisitStarts {
+		v := &anomalies.VisitStarts[i]
+		merged = append(merged, combined{seq: v.Seq, vs: v})
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].seq < merged[j].seq })
+
+	emitTruncs := func(trs []truncObservation, paired *fallthroughObservation) {
+		// Combine multi-stream truncations into one suggestion so the
+		// operator sees a single "stdout + stderr both truncated" line
+		// rather than two repetitive ones.
+		nodeID := trs[0].NodeID
+		var streamMsgs []string
+		for _, tr := range trs {
+			streamMsgs = append(streamMsgs,
+				fmt.Sprintf("%s captured last %d bytes of %d (dropped %d from head; limit %d)",
+					tr.Stream, tr.CapturedBytes, tr.TotalBytes, tr.DroppedBytes, tr.Limit))
+		}
+		msg := fmt.Sprintf("%s: tool output truncated — %s. The tail-window capture is designed to preserve a routing marker emitted at end-of-output (as long as the marker fits within the limit). Raise the per-node `output_limit` attribute if you need more context retained or if the marker itself is larger than the cap.",
+			nodeID, strings.Join(streamMsgs, "; "))
+		if paired != nil {
+			var tried []string
+			for _, c := range paired.ConditionsTried {
+				tried = append(tried, c.Condition)
+			}
+			msg += fmt.Sprintf(" Note: routing on this node also fell through to %q after %d conditional edge(s) evaluated false (%s) — verify the captured tail is what you expect.",
+				paired.EdgeTo, len(paired.ConditionsTried), strings.Join(tried, "; "))
+		}
+		out = append(out, Suggestion{
+			NodeID: nodeID, Kind: SuggestionToolOutputTruncated, Message: msg,
+		})
+	}
+	emitFt := func(fb fallthroughObservation) {
+		var tried []string
+		for _, c := range fb.ConditionsTried {
+			tried = append(tried, c.Condition)
+		}
+		out = append(out, Suggestion{
+			NodeID: fb.NodeID, Kind: SuggestionConditionalFallthrough,
+			Message: fmt.Sprintf("%s: %d conditional edge(s) all evaluated false (%s); routing fell back to %q. If this was unintentional, check the routing context — `ctx.outcome`, `ctx.tool_stdout`, or whatever your conditions reference.",
+				fb.NodeID, len(fb.ConditionsTried), strings.Join(tried, "; "), fb.EdgeTo),
+		})
+	}
+
+	for _, ev := range merged {
+		switch {
+		case ev.vs != nil:
+			if trs := pending[ev.vs.NodeID]; len(trs) > 0 {
+				emitTruncs(trs, nil)
+				delete(pending, ev.vs.NodeID)
+			}
+		case ev.tr != nil:
+			pending[ev.tr.NodeID] = append(pending[ev.tr.NodeID], *ev.tr)
+		case ev.fb != nil:
+			if trs, ok := pending[ev.fb.NodeID]; ok && len(trs) > 0 {
+				emitTruncs(trs, ev.fb)
+				delete(pending, ev.fb.NodeID)
+			} else {
+				emitFt(*ev.fb)
+			}
+		}
+	}
+	// Flush any leftover pending truncations as orphan suggestions.
+	// Iterate the original Truncations slice for deterministic output
+	// ordering (map iteration order is randomized in Go).
+	emitted := map[string]bool{}
+	for _, tr := range anomalies.Truncations {
+		if emitted[tr.NodeID] {
+			continue
+		}
+		if trs := pending[tr.NodeID]; len(trs) > 0 {
+			emitTruncs(trs, nil)
+			emitted[tr.NodeID] = true
+		}
 	}
 	return out
 }

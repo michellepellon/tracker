@@ -398,7 +398,7 @@ func (e *Engine) advanceToNextNode(s *runState, currentNodeID string, traceEntry
 		return *lr
 	}
 
-	next, err := e.selectEdge(edges, s.pctx)
+	next, err := e.selectEdge(s.runID, edges, s.pctx)
 	if err != nil {
 		s.trace.AddEntry(*traceEntry)
 		return loopResult{action: loopReturn, err: fmt.Errorf("select edge from %q: %w", currentNodeID, err)}
