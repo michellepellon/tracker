@@ -106,6 +106,14 @@ const (
 	// emitted to stdout. Surfaces the captured stdout tail and the
 	// recommended author pattern. Issue #212.
 	SuggestionToolRouteMissing SuggestionKind = "tool_route_missing"
+	// SuggestionAuditLogInjection fires when the integrity-protected
+	// activity log has one or more lines missing the runtime sentinel
+	// prefix (#213). Detection-only — the suggestion text is explicit
+	// that the sentinel is not authentication; a motivated forger who
+	// reads tracker's source can emit the bytes. Surfaces the count of
+	// suspect lines and the audit-log path so operators can
+	// investigate.
+	SuggestionAuditLogInjection SuggestionKind = "audit_log_injection"
 )
 
 // Diagnose analyzes a run directory and returns a structured report.
@@ -177,6 +185,18 @@ type runtimeAnomalies struct {
 	// suggestion builder can flush stale pending truncations from a
 	// prior visit as orphans before pairing within the new visit.
 	VisitStarts []visitBoundary
+	// InjectedLines counts non-sentinel lines in the integrity-
+	// protected activity log (#213). Non-zero implies something other
+	// than the tracker runtime wrote to the secure file — either an
+	// injected forgery from a tool subprocess that discovered the
+	// absolute path, or a runtime bug. Always 0 when the legacy
+	// fallback path was the source: legacy/snapshot files don't carry
+	// the sentinel and absence isn't a signal there.
+	InjectedLines int
+	// AuditLogPath is the on-disk path the scan read from. Surfaced in
+	// the SuggestionAuditLogInjection message so operators know which
+	// file to inspect. Empty when the activity log didn't exist.
+	AuditLogPath string
 }
 
 type markerMissingObservation struct {
@@ -329,16 +349,22 @@ type diagnoseEntry struct {
 	RouteTail string `json:"route_tail"`
 }
 
-// enrichFromActivity streams activity.jsonl, populating failures + detecting
+// enrichFromActivity streams the activity log (preferring the secure
+// path; see ResolveActivityLogPath), populating failures + detecting
 // budget halt events and runtime anomalies (tool-output truncations,
 // conditional fallthroughs). Returns (nil, runtimeAnomalies{}, nil) if
-// activity.jsonl does not exist (runs that never started). Returns
+// the activity log does not exist (runs that never started). Returns
 // ctx.Err() if cancellation fires mid-parse, and scanner.Err() if the
 // scanner aborts (buffer overflow at 1 MB, I/O error) — both surface
 // truncation to the caller so partial analysis is never silently treated
 // as authoritative.
+//
+// When the secure path is the source, lines lacking the runtime
+// sentinel prefix are counted in anomalies.InjectedLines so the
+// suggestion builder can fire SuggestionAuditLogInjection. Sentinel
+// stripping happens here, before JSON unmarshaling.
 func enrichFromActivity(ctx context.Context, runDir string, failures map[string]*NodeFailure, logW io.Writer) (*BudgetHalt, runtimeAnomalies, error) {
-	path := filepath.Join(runDir, "activity.jsonl")
+	path, secureUsed := ResolveActivityLogPath(runDir)
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -347,11 +373,11 @@ func enrichFromActivity(ctx context.Context, runDir string, failures map[string]
 		return nil, runtimeAnomalies{}, fmt.Errorf("open activity log: %w", err)
 	}
 	defer f.Close()
+	anomalies := runtimeAnomalies{AuditLogPath: path}
 
 	stageStarts := map[string]time.Time{}
 	failSignatures := map[string][]string{}
 	var halt *BudgetHalt
-	var anomalies runtimeAnomalies
 	// anomalySeq increments on every truncation or fallthrough so the
 	// suggestion builder can merge the two slices into a single
 	// chronologically-ordered stream — required to correctly pair the
@@ -366,9 +392,14 @@ func enrichFromActivity(ctx context.Context, runDir string, failures map[string]
 		if err := ctx.Err(); err != nil {
 			return nil, runtimeAnomalies{}, err
 		}
-		line := strings.TrimSpace(scanner.Text())
+		raw := scanner.Text()
+		body, hasSentinel := stripActivitySentinel(raw)
+		line := strings.TrimSpace(body)
 		if line == "" {
 			continue
+		}
+		if secureUsed && !hasSentinel {
+			anomalies.InjectedLines++
 		}
 		var entry diagnoseEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
@@ -527,6 +558,18 @@ func buildSuggestions(failures []NodeFailure, halt *BudgetHalt, anomalies runtim
 		out = append(out, Suggestion{
 			Kind:    SuggestionBudget,
 			Message: "Raise the relevant --max-tokens, --max-cost, or --max-wall-time flag, or remove the Config.Budget value",
+		})
+	}
+	if anomalies.InjectedLines > 0 {
+		plural := "line"
+		if anomalies.InjectedLines > 1 {
+			plural = "lines"
+		}
+		out = append(out, Suggestion{
+			Kind: SuggestionAuditLogInjection,
+			Message: fmt.Sprintf(
+				"audit log integrity: %d %s in %s lacked the runtime sentinel prefix. Treat the audit trail as compromised — something other than the tracker runtime wrote to the secure log. The sentinel is detection-only (not cryptographic authentication), so a motivated attacker who knows about the scheme can forge it; investigate the run's tool subprocesses and any side processes that may have known the absolute path.",
+				anomalies.InjectedLines, plural, anomalies.AuditLogPath),
 		})
 	}
 	// Merge truncations, fallthroughs, and visit-start boundaries into a

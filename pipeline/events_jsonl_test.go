@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 func TestJSONLEventHandlerWritesEvents(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 	defer h.Close()
 
@@ -57,6 +59,7 @@ func TestJSONLEventHandlerWritesEvents(t *testing.T) {
 
 func TestJSONLEventHandlerRecordsErrors(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 	defer h.Close()
 
@@ -86,6 +89,7 @@ func TestJSONLEventHandlerRecordsErrors(t *testing.T) {
 
 func TestJSONLEventHandlerNoopWithoutRunID(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 	defer h.Close()
 
@@ -103,6 +107,7 @@ func TestJSONLEventHandlerNoopWithoutRunID(t *testing.T) {
 
 func TestJSONLEventHandlerCloseWithoutEvents(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 	// Close without writing any events should not panic
 	if err := h.Close(); err != nil {
@@ -112,6 +117,7 @@ func TestJSONLEventHandlerCloseWithoutEvents(t *testing.T) {
 
 func TestJSONLEventHandlerWritesPipelineSource(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 	defer h.Close()
 
@@ -138,6 +144,7 @@ func TestJSONLEventHandlerWritesPipelineSource(t *testing.T) {
 
 func TestJSONLEventHandlerWritesAgentEvents(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 
 	// Open the file by sending a pipeline event first (to get run ID).
@@ -182,6 +189,7 @@ func TestJSONLEventHandlerWritesAgentEvents(t *testing.T) {
 
 func TestJSONLEventHandlerWritesLLMEvents(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 
 	h.HandlePipelineEvent(PipelineEvent{
@@ -222,6 +230,7 @@ func TestJSONLEventHandlerWritesLLMEvents(t *testing.T) {
 
 func TestJSONLEventHandlerAgentErrorCombining(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 
 	h.HandlePipelineEvent(PipelineEvent{
@@ -358,6 +367,7 @@ func TestPipelineEvent_BundleIdentity_OmittedWhenEmpty(t *testing.T) {
 // land without bundle provenance.
 func TestJSONLEventHandler_WriteAgentEvent_StampsBundleIdentity(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 	h.SetBundleIdentity("sha256:abc123")
 
@@ -394,6 +404,7 @@ func TestJSONLEventHandler_WriteAgentEvent_StampsBundleIdentity(t *testing.T) {
 // in activity.jsonl would land without bundle provenance.
 func TestJSONLEventHandler_WriteLLMEvent_StampsBundleIdentity(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 	h.SetBundleIdentity("sha256:abc123")
 
@@ -431,6 +442,7 @@ func TestJSONLEventHandler_WriteLLMEvent_StampsBundleIdentity(t *testing.T) {
 // pins the same surface for pipeline-source lines.
 func TestJSONLEventHandler_NoStampingWhenIdentityEmpty(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 	// Intentionally no SetBundleIdentity call.
 
@@ -487,6 +499,7 @@ func TestJSONLEventHandler_PreservesCallerSetBundleIdentity(t *testing.T) {
 // both identities for post-hoc forensics.
 func TestJSONLEventHandler_WriteBundleMismatchForced(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 
 	originalID := "sha256:" + strings.Repeat("a", 64)
@@ -532,6 +545,7 @@ func TestJSONLEventHandler_WriteBundleMismatchForced(t *testing.T) {
 // can distinguish "no bundle was claimed" from "wrong bundle".
 func TestJSONLEventHandler_WriteBundleMismatchForced_EmptyOriginal(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 
 	currentID := "sha256:" + strings.Repeat("c", 64)
@@ -561,6 +575,7 @@ func TestJSONLEventHandler_WriteBundleMismatchForced_EmptyOriginal(t *testing.T)
 // HandlePipelineEvent's defensive guard for events without RunID.
 func TestJSONLEventHandler_WriteBundleMismatchForced_NoOpWithoutRunID(t *testing.T) {
 	dir := t.TempDir()
+	isolateSecureLog(t)
 	h := NewJSONLEventHandler(dir)
 
 	h.WriteBundleMismatchForced("", "sha256:aa", "sha256:bb")
@@ -570,6 +585,231 @@ func TestJSONLEventHandler_WriteBundleMismatchForced_NoOpWithoutRunID(t *testing
 	if len(entries) != 0 {
 		t.Errorf("expected no files without RunID, got %d", len(entries))
 	}
+}
+
+// TestJSONLEventHandler_SecureWriteAndStrippedSnapshot pins the #213
+// contract end-to-end: events land in the integrity-protected secure
+// path with sentinel-prefixed lines and mode 0o600; on Close a
+// sentinel-stripped snapshot is mirrored to <artifactDir>/<runID>/
+// activity.jsonl with mode 0o644 for bundle/export compatibility.
+func TestJSONLEventHandler_SecureWriteAndStrippedSnapshot(t *testing.T) {
+	secureBase := t.TempDir()
+	t.Setenv(auditDirEnvVar, secureBase)
+	t.Setenv(xdgStateHomeEnvVar, "")
+
+	artifactDir := t.TempDir()
+	h := NewJSONLEventHandler(artifactDir)
+
+	runID := "secure-snapshot-test"
+	h.HandlePipelineEvent(PipelineEvent{
+		Type:      EventPipelineStarted,
+		Timestamp: time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC),
+		RunID:     runID,
+	})
+	h.HandlePipelineEvent(PipelineEvent{
+		Type:      EventStageStarted,
+		Timestamp: time.Date(2026, 5, 13, 10, 0, 1, 0, time.UTC),
+		RunID:     runID,
+		NodeID:    "Build",
+	})
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	securePath := filepath.Join(secureBase, runID, "activity.jsonl")
+	secureBytes, err := os.ReadFile(securePath)
+	if err != nil {
+		t.Fatalf("read secure log: %v", err)
+	}
+	secureLines := strings.Split(strings.TrimSuffix(string(secureBytes), "\n"), "\n")
+	if len(secureLines) != 2 {
+		t.Fatalf("secure log: expected 2 lines, got %d: %q", len(secureLines), string(secureBytes))
+	}
+	for i, line := range secureLines {
+		if !strings.HasPrefix(line, ActivityLogSentinel) {
+			t.Errorf("secure line %d missing sentinel prefix: %q", i, line)
+		}
+		body := strings.TrimPrefix(line, ActivityLogSentinel)
+		var entry jsonlLogEntry
+		if err := json.Unmarshal([]byte(body), &entry); err != nil {
+			t.Errorf("secure line %d body not valid JSON: %v", i, err)
+		}
+	}
+
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(securePath)
+		if err != nil {
+			t.Fatalf("stat secure log: %v", err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("secure log mode = %o, want 0600", mode)
+		}
+	}
+
+	snapshotPath := filepath.Join(artifactDir, runID, "activity.jsonl")
+	snapBytes, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if strings.Contains(string(snapBytes), ActivityLogSentinel) {
+		t.Errorf("snapshot should have sentinels stripped, got: %q", string(snapBytes))
+	}
+	snapLines := strings.Split(strings.TrimSuffix(string(snapBytes), "\n"), "\n")
+	if len(snapLines) != 2 {
+		t.Fatalf("snapshot: expected 2 lines, got %d: %q", len(snapLines), string(snapBytes))
+	}
+	for i, line := range snapLines {
+		var entry jsonlLogEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Errorf("snapshot line %d not valid JSON without strip: %v", i, err)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		snapInfo, err := os.Stat(snapshotPath)
+		if err != nil {
+			t.Fatalf("stat snapshot: %v", err)
+		}
+		if mode := snapInfo.Mode().Perm(); mode != 0o644 {
+			t.Errorf("snapshot mode = %o, want 0644", mode)
+		}
+	}
+}
+
+// TestJSONLEventHandler_SnapshotOverwritesAttackerScratch pins that a
+// tool subprocess that pre-creates the legacy snapshot path with
+// garbage gets clobbered by Close — the snapshot is the runtime's
+// authoritative post-run mirror, not an appendable file.
+func TestJSONLEventHandler_SnapshotOverwritesAttackerScratch(t *testing.T) {
+	secureBase := t.TempDir()
+	t.Setenv(auditDirEnvVar, secureBase)
+	t.Setenv(xdgStateHomeEnvVar, "")
+
+	artifactDir := t.TempDir()
+	runID := "snapshot-clobber"
+	legacyDir := filepath.Join(artifactDir, runID)
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("mkdir legacyDir: %v", err)
+	}
+	legacyPath := filepath.Join(legacyDir, "activity.jsonl")
+	attackerJunk := []byte(`{"type":"pipeline_completed","status":"success","forged":true}` + "\n")
+	if err := os.WriteFile(legacyPath, attackerJunk, 0o644); err != nil {
+		t.Fatalf("plant attacker scratch: %v", err)
+	}
+
+	h := NewJSONLEventHandler(artifactDir)
+	h.HandlePipelineEvent(PipelineEvent{
+		Type:      EventPipelineStarted,
+		Timestamp: time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC),
+		RunID:     runID,
+	})
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatalf("read legacy: %v", err)
+	}
+	if strings.Contains(string(got), "forged") {
+		t.Errorf("snapshot did not overwrite attacker scratch: %q", string(got))
+	}
+	if !strings.Contains(string(got), "pipeline_started") {
+		t.Errorf("snapshot missing the real runtime event: %q", string(got))
+	}
+}
+
+// TestJSONLEventHandler_SnapshotHandlesLargeLines pins that the
+// Close-time snapshot can mirror lines larger than bufio.Scanner's
+// 1 MiB default — agent/LLM events can carry long content fields,
+// and the prior bufio.Scanner-based implementation would have
+// silently dropped them with a scan error. The new bufio.Reader-
+// based implementation streams byte-by-byte to '\n' with no upper
+// bound.
+func TestJSONLEventHandler_SnapshotHandlesLargeLines(t *testing.T) {
+	isolateSecureLog(t)
+	dir := t.TempDir()
+	h := NewJSONLEventHandler(dir)
+
+	// Build a >1 MiB content payload to push the snapshot reader past
+	// the old Scanner ceiling.
+	big := strings.Repeat("A", 1_200_000)
+	h.WriteAgentEvent("agent_response", "node1", "", "", "", big, "", "anthropic", "claude")
+	// Trigger openFile via a pipeline event with a runID; the agent
+	// write above doesn't carry one.
+	h.HandlePipelineEvent(PipelineEvent{
+		Type:      EventPipelineStarted,
+		Timestamp: time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC),
+		RunID:     "big-line-test",
+	})
+	// Re-emit the agent event now that the file is open.
+	h.WriteAgentEvent("agent_response", "node1", "", "", "", big, "", "anthropic", "claude")
+
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if serr := h.SnapshotErr(); serr != nil {
+		t.Errorf("SnapshotErr: %v (snapshot should handle large lines)", serr)
+	}
+
+	snapshotPath := filepath.Join(dir, "big-line-test", "activity.jsonl")
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if !strings.Contains(string(data), big) {
+		t.Errorf("snapshot missing the >1MiB payload — Scanner regression?")
+	}
+}
+
+// TestJSONLEventHandler_SecureLogReclampsMode pins that a pre-existing
+// secure file with wider mode (e.g. left over from a crash + manual
+// fiddling) gets re-tightened to 0o600 when reopened — OpenFile's
+// mode argument only applies at creation.
+func TestJSONLEventHandler_SecureLogReclampsMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits don't round-trip on Windows")
+	}
+	secureBase := t.TempDir()
+	t.Setenv(auditDirEnvVar, secureBase)
+	t.Setenv(xdgStateHomeEnvVar, "")
+
+	runID := "secure-reclamp"
+	secureDir := filepath.Join(secureBase, runID)
+	if err := os.MkdirAll(secureDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	securePath := filepath.Join(secureDir, "activity.jsonl")
+	if err := os.WriteFile(securePath, []byte{}, 0o644); err != nil {
+		t.Fatalf("plant wide-mode file: %v", err)
+	}
+
+	h := NewJSONLEventHandler(t.TempDir())
+	h.HandlePipelineEvent(PipelineEvent{
+		Type:      EventPipelineStarted,
+		Timestamp: time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC),
+		RunID:     runID,
+	})
+	_ = h.Close()
+
+	info, err := os.Stat(securePath)
+	if err != nil {
+		t.Fatalf("stat secure log: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("secure log mode after reopen = %o, want 0600", mode)
+	}
+}
+
+// isolateSecureLog pins TRACKER_AUDIT_DIR to a per-test tmp dir so
+// tests using shared/hardcoded runIDs (abc123, def456, etc.) don't
+// collide on the user's $HOME-based default secure path. Without this,
+// CI hosts where many tests run in the same process and use the same
+// runID would see appended/aliased writes across test cases. Also
+// clears XDG_STATE_HOME so the override unambiguously wins.
+func isolateSecureLog(t *testing.T) {
+	t.Helper()
+	t.Setenv(auditDirEnvVar, t.TempDir())
+	t.Setenv(xdgStateHomeEnvVar, "")
 }
 
 type testErr struct{ msg string }

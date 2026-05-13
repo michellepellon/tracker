@@ -121,32 +121,108 @@ type ActivityEntry struct {
 	Error     string
 }
 
-// LoadActivityLog reads and parses activity.jsonl, skipping malformed lines.
-// Returns (nil, nil) if the file does not exist.
+// ResolveActivityLogPath returns the on-disk location of the activity
+// log for runDir. It prefers the integrity-protected secure path
+// (#213) when present, falling back to <runDir>/activity.jsonl for
+// pre-#213 runs and post-run snapshots. The returned secureUsed flag
+// is true when the path came from the secure location — callers that
+// validate the runtime sentinel should only do so in that case.
+//
+// runID is derived from runDir's basename, matching the
+// .tracker/runs/<runID> layout enforced by ResolveRunDir.
+func ResolveActivityLogPath(runDir string) (path string, secureUsed bool) {
+	runID := filepath.Base(runDir)
+	if runID != "" && runID != "." && runID != string(filepath.Separator) {
+		if securePath, err := pipeline.SecureActivityLogPath(runID); err == nil {
+			if _, statErr := os.Stat(securePath); statErr == nil {
+				return securePath, true
+			}
+		}
+	}
+	return filepath.Join(runDir, "activity.jsonl"), false
+}
+
+// LoadActivityLog reads and parses the activity log for runDir, preferring
+// the integrity-protected secure path with fallback to the legacy
+// <runDir>/activity.jsonl. Returns (nil, nil) if neither location has a
+// file. Malformed lines are skipped. Sentinel-stripped lines that don't
+// parse as JSON are dropped silently — callers needing tamper-detection
+// granularity should use ScanActivityLog (or the Diagnose path).
 func LoadActivityLog(runDir string) ([]ActivityEntry, error) {
-	path := filepath.Join(runDir, "activity.jsonl")
+	scan, err := ScanActivityLog(runDir)
+	if err != nil {
+		return nil, err
+	}
+	return scan.Entries, nil
+}
+
+// ActivityLogScan is the structured result of reading an activity log.
+// Path is the on-disk location read; SecureUsed reflects whether the
+// integrity-protected secure log was the source; InjectedLines counts
+// non-sentinel lines observed when reading from the secure path
+// (always 0 when SecureUsed is false — legacy/snapshot files don't
+// carry the runtime sentinel, so absence is not a signal).
+type ActivityLogScan struct {
+	Path          string
+	SecureUsed    bool
+	Entries       []ActivityEntry
+	InjectedLines int
+	TotalLines    int
+	SentinelLines int
+}
+
+// ScanActivityLog is LoadActivityLog with tamper-detection counters
+// exposed for callers (e.g. Diagnose) that need to surface injection
+// signals. Lines without the runtime sentinel prefix in the secure
+// file count toward InjectedLines; the line is still parsed best-effort
+// so its content is visible to forensics.
+func ScanActivityLog(runDir string) (*ActivityLogScan, error) {
+	path, secureUsed := ResolveActivityLogPath(runDir)
+	scan := &ActivityLogScan{Path: path, SecureUsed: secureUsed}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return scan, nil
 		}
-		return nil, fmt.Errorf("open activity log: %w", err)
+		return scan, fmt.Errorf("open activity log: %w", err)
 	}
 	defer f.Close()
-	var entries []ActivityEntry
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+		raw := scanner.Text()
+		line, hasSentinel := stripActivitySentinel(raw)
+		// Count sentinel/injection BEFORE the blank-line skip so a
+		// non-sentinel blank line on the secure file still increments
+		// InjectedLines — an attacker emitting blank padding shouldn't
+		// be able to hide from the integrity counter.
+		scan.TotalLines++
+		if secureUsed {
+			if hasSentinel {
+				scan.SentinelLines++
+			} else {
+				scan.InjectedLines++
+			}
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
 			continue
 		}
-		entry, ok := ParseActivityLine(line)
-		if ok {
-			entries = append(entries, entry)
+		if entry, ok := ParseActivityLine(trimmed); ok {
+			scan.Entries = append(scan.Entries, entry)
 		}
 	}
-	return entries, scanner.Err()
+	return scan, scanner.Err()
+}
+
+// stripActivitySentinel removes the runtime sentinel prefix if present
+// and reports whether it was found. Both signals matter: the parsed
+// body for content, and the prefix flag for tamper detection.
+func stripActivitySentinel(line string) (string, bool) {
+	if strings.HasPrefix(line, pipeline.ActivityLogSentinel) {
+		return line[len(pipeline.ActivityLogSentinel):], true
+	}
+	return line, false
 }
 
 // SortActivityByTime sorts entries ascending by Timestamp.
