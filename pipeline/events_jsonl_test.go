@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -635,12 +636,14 @@ func TestJSONLEventHandler_SecureWriteAndStrippedSnapshot(t *testing.T) {
 		}
 	}
 
-	info, err := os.Stat(securePath)
-	if err != nil {
-		t.Fatalf("stat secure log: %v", err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("secure log mode = %o, want 0600", mode)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(securePath)
+		if err != nil {
+			t.Fatalf("stat secure log: %v", err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("secure log mode = %o, want 0600", mode)
+		}
 	}
 
 	snapshotPath := filepath.Join(artifactDir, runID, "activity.jsonl")
@@ -661,12 +664,14 @@ func TestJSONLEventHandler_SecureWriteAndStrippedSnapshot(t *testing.T) {
 			t.Errorf("snapshot line %d not valid JSON without strip: %v", i, err)
 		}
 	}
-	snapInfo, err := os.Stat(snapshotPath)
-	if err != nil {
-		t.Fatalf("stat snapshot: %v", err)
-	}
-	if mode := snapInfo.Mode().Perm(); mode != 0o644 {
-		t.Errorf("snapshot mode = %o, want 0644", mode)
+	if runtime.GOOS != "windows" {
+		snapInfo, err := os.Stat(snapshotPath)
+		if err != nil {
+			t.Fatalf("stat snapshot: %v", err)
+		}
+		if mode := snapInfo.Mode().Perm(); mode != 0o644 {
+			t.Errorf("snapshot mode = %o, want 0644", mode)
+		}
 	}
 }
 
@@ -710,6 +715,88 @@ func TestJSONLEventHandler_SnapshotOverwritesAttackerScratch(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "pipeline_started") {
 		t.Errorf("snapshot missing the real runtime event: %q", string(got))
+	}
+}
+
+// TestJSONLEventHandler_SnapshotHandlesLargeLines pins that the
+// Close-time snapshot can mirror lines larger than bufio.Scanner's
+// 1 MiB default — agent/LLM events can carry long content fields,
+// and the prior bufio.Scanner-based implementation would have
+// silently dropped them with a scan error. The new bufio.Reader-
+// based implementation streams byte-by-byte to '\n' with no upper
+// bound.
+func TestJSONLEventHandler_SnapshotHandlesLargeLines(t *testing.T) {
+	isolateSecureLog(t)
+	dir := t.TempDir()
+	h := NewJSONLEventHandler(dir)
+
+	// Build a >1 MiB content payload to push the snapshot reader past
+	// the old Scanner ceiling.
+	big := strings.Repeat("A", 1_200_000)
+	h.WriteAgentEvent("agent_response", "node1", "", "", "", big, "", "anthropic", "claude")
+	// Trigger openFile via a pipeline event with a runID; the agent
+	// write above doesn't carry one.
+	h.HandlePipelineEvent(PipelineEvent{
+		Type:      EventPipelineStarted,
+		Timestamp: time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC),
+		RunID:     "big-line-test",
+	})
+	// Re-emit the agent event now that the file is open.
+	h.WriteAgentEvent("agent_response", "node1", "", "", "", big, "", "anthropic", "claude")
+
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if serr := h.SnapshotErr(); serr != nil {
+		t.Errorf("SnapshotErr: %v (snapshot should handle large lines)", serr)
+	}
+
+	snapshotPath := filepath.Join(dir, "big-line-test", "activity.jsonl")
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if !strings.Contains(string(data), big) {
+		t.Errorf("snapshot missing the >1MiB payload — Scanner regression?")
+	}
+}
+
+// TestJSONLEventHandler_SecureLogReclampsMode pins that a pre-existing
+// secure file with wider mode (e.g. left over from a crash + manual
+// fiddling) gets re-tightened to 0o600 when reopened — OpenFile's
+// mode argument only applies at creation.
+func TestJSONLEventHandler_SecureLogReclampsMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits don't round-trip on Windows")
+	}
+	secureBase := t.TempDir()
+	t.Setenv(auditDirEnvVar, secureBase)
+	t.Setenv(xdgStateHomeEnvVar, "")
+
+	runID := "secure-reclamp"
+	secureDir := filepath.Join(secureBase, runID)
+	if err := os.MkdirAll(secureDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	securePath := filepath.Join(secureDir, "activity.jsonl")
+	if err := os.WriteFile(securePath, []byte{}, 0o644); err != nil {
+		t.Fatalf("plant wide-mode file: %v", err)
+	}
+
+	h := NewJSONLEventHandler(t.TempDir())
+	h.HandlePipelineEvent(PipelineEvent{
+		Type:      EventPipelineStarted,
+		Timestamp: time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC),
+		RunID:     runID,
+	})
+	_ = h.Close()
+
+	info, err := os.Stat(securePath)
+	if err != nil {
+		t.Fatalf("stat secure log: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("secure log mode after reopen = %o, want 0600", mode)
 	}
 }
 

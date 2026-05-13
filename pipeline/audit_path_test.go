@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -40,8 +41,12 @@ func TestSecureActivityLogPath_XDG(t *testing.T) {
 }
 
 // TestSecureActivityLogPath_HomeDefault pins the Linux+macOS default
-// when neither override nor XDG is set.
+// when neither override nor XDG is set. Skipped on Windows because
+// secureActivityLogBase prefers LOCALAPPDATA before HOME there.
 func TestSecureActivityLogPath_HomeDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("HOME default branch is unix-only; Windows uses LOCALAPPDATA")
+	}
 	t.Setenv(auditDirEnvVar, "")
 	t.Setenv(xdgStateHomeEnvVar, "")
 	t.Setenv("HOME", "/Users/alice")
@@ -116,8 +121,15 @@ func TestSecureActivityLogPath_AcceptsCleanRunIDs(t *testing.T) {
 // TRACKER_AUDIT_DIR / XDG_STATE_HOME silently falls through to the
 // next candidate. The threat is that a misconfigured value like
 // "TRACKER_AUDIT_DIR=.tracker/runs" would land the "secure" log
-// inside the process CWD — defeating the relocation defense.
+// inside the process CWD — defeating the relocation defense. We
+// prefer silent fallback over erroring because the only consumer of
+// errors here is HandlePipelineEvent which swallows them — erroring
+// would silently drop all events instead of falling back to a usable
+// default location.
 func TestSecureActivityLogBase_IgnoresRelativeEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("HOME-default branch is unix-only; Windows uses LOCALAPPDATA")
+	}
 	t.Setenv(auditDirEnvVar, "relative/path")
 	t.Setenv(xdgStateHomeEnvVar, ".local/state")
 	t.Setenv("HOME", "/Users/alice")

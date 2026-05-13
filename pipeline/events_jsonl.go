@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -103,6 +104,7 @@ type JSONLEventHandler struct {
 	securePath     string
 	file           *os.File
 	bundleIdentity string
+	snapshotErr    error // populated by Close; readable via SnapshotErr.
 }
 
 // NewJSONLEventHandler creates a JSONL event logger. The live log lands
@@ -156,6 +158,12 @@ func (h *JSONLEventHandler) openFile(runID string) error {
 	if err != nil {
 		return err
 	}
+	// Force-tighten the file mode: the 0o600 in OpenFile only applies
+	// at creation, so a pre-existing file from a prior run (or a race)
+	// could retain wider permissions. Best-effort — errors are
+	// non-fatal because the underlying access control is same-UID, the
+	// mode is defense-in-depth against other local users.
+	_ = os.Chmod(securePath, 0o600)
 	// Defense in depth: if the directory was created with a more
 	// permissive mode by an earlier process (race or pre-existing dir),
 	// re-chmod best-effort. Errors are non-fatal — the file mode is
@@ -384,9 +392,11 @@ func (h *JSONLEventHandler) writeEntry(entry jsonlLogEntry) {
 
 // Close flushes the secure activity log, writes a sentinel-stripped
 // snapshot to <artifactDir>/<runID>/activity.jsonl for bundle/export
-// consumers, and closes the underlying file. Snapshot write errors are
-// non-fatal — the secure file is the authoritative record; the snapshot
-// is best-effort for portability.
+// consumers, and closes the underlying file. The snapshot is
+// best-effort: snapshot errors don't break Close (the secure file is
+// the authoritative record) but they're stashed on h.snapshotErr so
+// callers that care about bundle/export coverage can inspect them via
+// SnapshotErr().
 func (h *JSONLEventHandler) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -398,10 +408,24 @@ func (h *JSONLEventHandler) Close() error {
 		h.file = nil
 		return err
 	}
-	_ = h.writeSnapshot()
+	if err := h.writeSnapshot(); err != nil {
+		h.snapshotErr = err
+	}
 	err := h.file.Close()
 	h.file = nil
 	return err
+}
+
+// SnapshotErr returns the error (if any) from the most recent Close-time
+// snapshot mirror to the legacy run-dir path. Callers that depend on
+// the legacy snapshot for bundle export or external tooling can check
+// this after Close. Nil when the snapshot succeeded or was skipped
+// (no artifactDir / no events). The secure file remains authoritative
+// regardless of this value.
+func (h *JSONLEventHandler) SnapshotErr() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.snapshotErr
 }
 
 // refuseIfSymlink errors when path exists and is a symlink. Missing
@@ -470,19 +494,28 @@ func (h *JSONLEventHandler) writeSnapshot() error {
 	defer dst.Close()
 
 	w := bufio.NewWriter(dst)
-	scanner := bufio.NewScanner(src)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimPrefix(scanner.Bytes(), []byte(ActivityLogSentinel))
-		if _, err := w.Write(line); err != nil {
-			return fmt.Errorf("snapshot write: %w", err)
+	// Use bufio.Reader.ReadBytes('\n') instead of bufio.Scanner so the
+	// snapshot can handle arbitrarily long lines. Agent/LLM events can
+	// produce JSONL entries that exceed bufio.Scanner's 1 MiB default
+	// (e.g. long ContextSnapshot maps or aggregated tool stdout in
+	// captured content fields). Scanner would have silently dropped
+	// those by erroring at scan-time.
+	r := bufio.NewReaderSize(src, 64*1024)
+	sentinel := []byte(ActivityLogSentinel)
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			line = bytes.TrimPrefix(line, sentinel)
+			if _, wErr := w.Write(line); wErr != nil {
+				return fmt.Errorf("snapshot write: %w", wErr)
+			}
 		}
-		if err := w.WriteByte('\n'); err != nil {
-			return fmt.Errorf("snapshot write: %w", err)
+		if err == io.EOF {
+			break
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("snapshot scan: %w", err)
+		if err != nil {
+			return fmt.Errorf("snapshot read: %w", err)
+		}
 	}
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("snapshot flush: %w", err)

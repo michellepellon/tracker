@@ -192,10 +192,10 @@ func ScanActivityLog(runDir string) (*ActivityLogScan, error) {
 	for scanner.Scan() {
 		raw := scanner.Text()
 		line, hasSentinel := stripActivitySentinel(raw)
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
+		// Count sentinel/injection BEFORE the blank-line skip so a
+		// non-sentinel blank line on the secure file still increments
+		// InjectedLines — an attacker emitting blank padding shouldn't
+		// be able to hide from the integrity counter.
 		scan.TotalLines++
 		if secureUsed {
 			if hasSentinel {
@@ -203,6 +203,10 @@ func ScanActivityLog(runDir string) (*ActivityLogScan, error) {
 			} else {
 				scan.InjectedLines++
 			}
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
 		}
 		if entry, ok := ParseActivityLine(trimmed); ok {
 			scan.Entries = append(scan.Entries, entry)
