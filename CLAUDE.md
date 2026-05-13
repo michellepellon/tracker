@@ -310,6 +310,15 @@ This applies to `tracker validate`, `tracker simulate`, and `tracker run` unifor
 - Use `go test -skip` (Go 1.24+) instead of `(?!` negative lookahead which Go's regexp doesn't support
 - The Decompose prompt explicitly instructs the agent on expected file formats
 
+### Activity log integrity (#213)
+- Threat model: tool subprocesses run with `cmd.Dir = workDir`. Pre-#213 the audit log lived at `<workDir>/.tracker/runs/<runID>/activity.jsonl` mode `0o644` — an LLM-controlled subprocess could append fake `decision_edge` lines, truncate to suppress `tool_output_truncated`, or forge a `pipeline_completed status=success`. Same threat shape as the tool_command safe-key allowlist above, applied to the log file instead of the command string.
+- Where the log lives now: live writes go to `$XDG_STATE_HOME/tracker/runs/<runID>/activity.jsonl` (default `$HOME/.local/state/tracker/runs/<runID>/`, mode `0o600`). Override via `TRACKER_AUDIT_DIR`. Windows fallback `%LOCALAPPDATA%\tracker\runs\<runID>\`. The path is computed by `pipeline.SecureActivityLogPath(runID)`.
+- Snapshot for bundles: on `JSONLEventHandler.Close()` a sentinel-stripped copy is written to the legacy `<workDir>/.tracker/runs/<runID>/activity.jsonl` (mode `0o644`, `O_NOFOLLOW` on unix). This keeps `--export-bundle` / git_artifacts working — they pick up the snapshot. The snapshot is best-effort; the secure file remains authoritative.
+- Sentinel scheme: every line the runtime writes is prefixed with `\x1f\x1e` (`pipeline.ActivityLogSentinel`). Diagnose/Audit prefer the secure path via `tracker.ResolveActivityLogPath` and validate the sentinel; lines lacking it count as `runtimeAnomalies.InjectedLines` and fire `SuggestionAuditLogInjection`.
+- What the scheme defends: casual injection — LLM-driven shell redirection (`>>`, `> file`), `tee -a`, `find . -name activity.jsonl -delete`, anything using relative paths from the project root. Relocation removes the relative-path reach entirely; sentinel makes any reach-via-absolute-path attempt detectable.
+- What the scheme does NOT defend: a motivated forger who reads tracker's source (open source) and emits the sentinel bytes themselves. The sentinel is detection, not authentication. Option C (per-line HMAC) is the next tier and is explicitly out of scope per the issue — the key-management cost is too high for the marginal gain. Document this honestly in any operator-facing copy: do not claim the runtime "prevents" forgery.
+- Migration: pre-#213 runs and runs whose secure file was lost (archive/move) have no secure file. `ResolveActivityLogPath` falls back to `<runDir>/activity.jsonl`, parses it without sentinel validation, and Diagnose surfaces no false-positive injection signal (absence of sentinel isn't a signal on the legacy path).
+
 ### Claude Code backend (v0.12.0, updated v0.13.0)
 - `AgentBackend` interface in `pipeline/backend.go` — minimal contract: one method to execute a node, returns `agent.Event` stream
 - `CodergenHandler` delegates to backends via `selectBackend()`, doesn't execute LLM calls directly

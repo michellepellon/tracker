@@ -3,10 +3,13 @@ package tracker
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/2389-research/tracker/pipeline"
 )
 
 func TestDiagnose_CleanRun(t *testing.T) {
@@ -272,5 +275,108 @@ func TestDiagnose_ToolRouteMissing(t *testing.T) {
 	}
 	if !strings.Contains(s.Message, "ctx.tool_route") {
 		t.Errorf("suggestion should mention the ctx.tool_route routing pattern, got: %q", s.Message)
+	}
+}
+
+// TestDiagnose_AuditLogInjection_SecureLines pins that mixing
+// sentinel-prefixed runtime lines and bare attacker-injected lines in
+// the secure activity log fires SuggestionAuditLogInjection with the
+// expected count and an explicit "detection, not authentication"
+// caveat. The fixture is built inline because the secure path is
+// resolved via TRACKER_AUDIT_DIR and can't live as a checked-in
+// testdata file.
+func TestDiagnose_AuditLogInjection_SecureLines(t *testing.T) {
+	secureBase := t.TempDir()
+	t.Setenv("TRACKER_AUDIT_DIR", secureBase)
+	t.Setenv("XDG_STATE_HOME", "")
+
+	runID := "diagnose-injection-test"
+	runDir := filepath.Join(t.TempDir(), ".tracker", "runs", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir runDir: %v", err)
+	}
+	writeCheckpoint(t, runDir, runID)
+
+	secureDir := filepath.Join(secureBase, runID)
+	if err := os.MkdirAll(secureDir, 0o700); err != nil {
+		t.Fatalf("mkdir secureDir: %v", err)
+	}
+	securePath := filepath.Join(secureDir, "activity.jsonl")
+	content := pipeline.ActivityLogSentinel + `{"ts":"2026-05-13T20:30:00Z","type":"pipeline_started"}` + "\n" +
+		`{"ts":"2026-05-13T20:30:01Z","type":"pipeline_completed","message":"forged completion"}` + "\n" +
+		pipeline.ActivityLogSentinel + `{"ts":"2026-05-13T20:30:02Z","type":"stage_started","node_id":"Build"}` + "\n" +
+		`{"ts":"2026-05-13T20:30:03Z","type":"decision_edge","edge_from":"x","edge_to":"y"}` + "\n"
+	if err := os.WriteFile(securePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write secure log: %v", err)
+	}
+
+	r, err := Diagnose(context.Background(), runDir)
+	if err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+
+	var injections []Suggestion
+	for _, s := range r.Suggestions {
+		if s.Kind == SuggestionAuditLogInjection {
+			injections = append(injections, s)
+		}
+	}
+	if len(injections) != 1 {
+		t.Fatalf("got %d injection suggestions, want 1; suggestions=%+v", len(injections), r.Suggestions)
+	}
+	msg := injections[0].Message
+	if !strings.Contains(msg, "2 lines") {
+		t.Errorf("message should report 2 injected lines, got: %q", msg)
+	}
+	if !strings.Contains(msg, securePath) {
+		t.Errorf("message should include the secure audit log path %q, got: %q", securePath, msg)
+	}
+	if !strings.Contains(msg, "detection-only") {
+		t.Errorf("message should call out detection-only / not authentication, got: %q", msg)
+	}
+}
+
+// TestDiagnose_AuditLogInjection_LegacyPathNoSignal pins that a legacy
+// run (no secure file, activity.jsonl directly under runDir) does NOT
+// fire SuggestionAuditLogInjection regardless of whether the lines
+// have sentinels. The legacy file is the post-#213 snapshot or a
+// pre-#213 historical run; absence of sentinel there is not a signal.
+func TestDiagnose_AuditLogInjection_LegacyPathNoSignal(t *testing.T) {
+	// Point TRACKER_AUDIT_DIR at an empty dir so no secure file exists
+	// for this runID — forces fallback to <runDir>/activity.jsonl.
+	t.Setenv("TRACKER_AUDIT_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", "")
+
+	runID := "diagnose-legacy-only"
+	runDir := filepath.Join(t.TempDir(), ".tracker", "runs", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir runDir: %v", err)
+	}
+	writeCheckpoint(t, runDir, runID)
+	// Plain JSONL with no sentinel — simulates a post-snapshot copy or
+	// a pre-#213 archived run.
+	legacy := filepath.Join(runDir, "activity.jsonl")
+	body := `{"ts":"2026-05-13T20:30:00Z","type":"pipeline_started"}` + "\n" +
+		`{"ts":"2026-05-13T20:30:01Z","type":"pipeline_completed"}` + "\n"
+	if err := os.WriteFile(legacy, []byte(body), 0o644); err != nil {
+		t.Fatalf("write legacy log: %v", err)
+	}
+
+	r, err := Diagnose(context.Background(), runDir)
+	if err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+	for _, s := range r.Suggestions {
+		if s.Kind == SuggestionAuditLogInjection {
+			t.Errorf("legacy path should not fire SuggestionAuditLogInjection, got: %+v", s)
+		}
+	}
+}
+
+func writeCheckpoint(t *testing.T, runDir, runID string) {
+	t.Helper()
+	cp := fmt.Sprintf(`{"run_id":%q,"completed_nodes":[],"current_node":"","retry_counts":{},"restart_count":0,"timestamp":"2026-05-13T20:30:00Z"}`, runID)
+	if err := os.WriteFile(filepath.Join(runDir, "checkpoint.json"), []byte(cp), 0o644); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
 	}
 }

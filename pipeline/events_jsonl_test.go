@@ -572,6 +572,133 @@ func TestJSONLEventHandler_WriteBundleMismatchForced_NoOpWithoutRunID(t *testing
 	}
 }
 
+// TestJSONLEventHandler_SecureWriteAndStrippedSnapshot pins the #213
+// contract end-to-end: events land in the integrity-protected secure
+// path with sentinel-prefixed lines and mode 0o600; on Close a
+// sentinel-stripped snapshot is mirrored to <artifactDir>/<runID>/
+// activity.jsonl with mode 0o644 for bundle/export compatibility.
+func TestJSONLEventHandler_SecureWriteAndStrippedSnapshot(t *testing.T) {
+	secureBase := t.TempDir()
+	t.Setenv(auditDirEnvVar, secureBase)
+	t.Setenv(xdgStateHomeEnvVar, "")
+
+	artifactDir := t.TempDir()
+	h := NewJSONLEventHandler(artifactDir)
+
+	runID := "secure-snapshot-test"
+	h.HandlePipelineEvent(PipelineEvent{
+		Type:      EventPipelineStarted,
+		Timestamp: time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC),
+		RunID:     runID,
+	})
+	h.HandlePipelineEvent(PipelineEvent{
+		Type:      EventStageStarted,
+		Timestamp: time.Date(2026, 5, 13, 10, 0, 1, 0, time.UTC),
+		RunID:     runID,
+		NodeID:    "Build",
+	})
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	securePath := filepath.Join(secureBase, runID, "activity.jsonl")
+	secureBytes, err := os.ReadFile(securePath)
+	if err != nil {
+		t.Fatalf("read secure log: %v", err)
+	}
+	secureLines := strings.Split(strings.TrimSuffix(string(secureBytes), "\n"), "\n")
+	if len(secureLines) != 2 {
+		t.Fatalf("secure log: expected 2 lines, got %d: %q", len(secureLines), string(secureBytes))
+	}
+	for i, line := range secureLines {
+		if !strings.HasPrefix(line, ActivityLogSentinel) {
+			t.Errorf("secure line %d missing sentinel prefix: %q", i, line)
+		}
+		body := strings.TrimPrefix(line, ActivityLogSentinel)
+		var entry jsonlLogEntry
+		if err := json.Unmarshal([]byte(body), &entry); err != nil {
+			t.Errorf("secure line %d body not valid JSON: %v", i, err)
+		}
+	}
+
+	info, err := os.Stat(securePath)
+	if err != nil {
+		t.Fatalf("stat secure log: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("secure log mode = %o, want 0600", mode)
+	}
+
+	snapshotPath := filepath.Join(artifactDir, runID, "activity.jsonl")
+	snapBytes, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if strings.Contains(string(snapBytes), ActivityLogSentinel) {
+		t.Errorf("snapshot should have sentinels stripped, got: %q", string(snapBytes))
+	}
+	snapLines := strings.Split(strings.TrimSuffix(string(snapBytes), "\n"), "\n")
+	if len(snapLines) != 2 {
+		t.Fatalf("snapshot: expected 2 lines, got %d: %q", len(snapLines), string(snapBytes))
+	}
+	for i, line := range snapLines {
+		var entry jsonlLogEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Errorf("snapshot line %d not valid JSON without strip: %v", i, err)
+		}
+	}
+	snapInfo, err := os.Stat(snapshotPath)
+	if err != nil {
+		t.Fatalf("stat snapshot: %v", err)
+	}
+	if mode := snapInfo.Mode().Perm(); mode != 0o644 {
+		t.Errorf("snapshot mode = %o, want 0644", mode)
+	}
+}
+
+// TestJSONLEventHandler_SnapshotOverwritesAttackerScratch pins that a
+// tool subprocess that pre-creates the legacy snapshot path with
+// garbage gets clobbered by Close — the snapshot is the runtime's
+// authoritative post-run mirror, not an appendable file.
+func TestJSONLEventHandler_SnapshotOverwritesAttackerScratch(t *testing.T) {
+	secureBase := t.TempDir()
+	t.Setenv(auditDirEnvVar, secureBase)
+	t.Setenv(xdgStateHomeEnvVar, "")
+
+	artifactDir := t.TempDir()
+	runID := "snapshot-clobber"
+	legacyDir := filepath.Join(artifactDir, runID)
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("mkdir legacyDir: %v", err)
+	}
+	legacyPath := filepath.Join(legacyDir, "activity.jsonl")
+	attackerJunk := []byte(`{"type":"pipeline_completed","status":"success","forged":true}` + "\n")
+	if err := os.WriteFile(legacyPath, attackerJunk, 0o644); err != nil {
+		t.Fatalf("plant attacker scratch: %v", err)
+	}
+
+	h := NewJSONLEventHandler(artifactDir)
+	h.HandlePipelineEvent(PipelineEvent{
+		Type:      EventPipelineStarted,
+		Timestamp: time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC),
+		RunID:     runID,
+	})
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatalf("read legacy: %v", err)
+	}
+	if strings.Contains(string(got), "forged") {
+		t.Errorf("snapshot did not overwrite attacker scratch: %q", string(got))
+	}
+	if !strings.Contains(string(got), "pipeline_started") {
+		t.Errorf("snapshot missing the real runtime event: %q", string(got))
+	}
+}
+
 type testErr struct{ msg string }
 
 func (e *testErr) Error() string { return e.msg }
