@@ -11,10 +11,11 @@ import (
 )
 
 // selectEdge picks the best outgoing edge using priority: condition > preferred label > suggested IDs > weight > lexical.
-func (e *Engine) selectEdge(edges []*Edge, pctx *PipelineContext) (*Edge, error) {
+// runID is stamped on every emitted decision/fallthrough event so activity.jsonl consumers can group every line by run.
+func (e *Engine) selectEdge(runID string, edges []*Edge, pctx *PipelineContext) (*Edge, error) {
 	ctxSnap := e.routingContextSnapshot(pctx)
 
-	edge, conditionsTried, err := e.selectByCondition(edges, pctx, ctxSnap)
+	edge, conditionsTried, err := e.selectByCondition(runID, edges, pctx, ctxSnap)
 	if edge != nil || err != nil {
 		return edge, err
 	}
@@ -34,6 +35,7 @@ func (e *Engine) selectEdge(edges []*Edge, pctx *PipelineContext) (*Edge, error)
 		e.emit(PipelineEvent{
 			Type:      EventConditionalFallthrough,
 			Timestamp: time.Now(),
+			RunID:     runID,
 			NodeID:    selected.From,
 			Message:   fmt.Sprintf("conditional fallthrough on node %q: %d condition(s) evaluated false, fell back to %s edge -> %q", selected.From, len(conditionsTried), priority, selected.To),
 			Decision: &DecisionDetail{
@@ -46,17 +48,17 @@ func (e *Engine) selectEdge(edges []*Edge, pctx *PipelineContext) (*Edge, error)
 		})
 	}
 
-	if edge := e.selectByLabel(edges, pctx, ctxSnap); edge != nil {
+	if edge := e.selectByLabel(runID, edges, pctx, ctxSnap); edge != nil {
 		emitFallthrough(edge, "label")
 		return edge, nil
 	}
 
-	if edge := e.selectBySuggested(edges, pctx, ctxSnap); edge != nil {
+	if edge := e.selectBySuggested(runID, edges, pctx, ctxSnap); edge != nil {
 		emitFallthrough(edge, "suggested")
 		return edge, nil
 	}
 
-	edge, weightPriority, err := e.selectByWeight(edges, pctx, ctxSnap)
+	edge, weightPriority, err := e.selectByWeight(runID, edges, pctx, ctxSnap)
 	if err == nil && edge != nil {
 		emitFallthrough(edge, weightPriority)
 	}
@@ -67,7 +69,7 @@ func (e *Engine) selectEdge(edges []*Edge, pctx *PipelineContext) (*Edge, error)
 // first match. Also returns the list of conditionals that evaluated false
 // (in declaration order) so the caller can emit a fallthrough signal if
 // routing ends up picking an unconditional fallback.
-func (e *Engine) selectByCondition(edges []*Edge, pctx *PipelineContext, ctxSnap map[string]string) (*Edge, []ConditionEval, error) {
+func (e *Engine) selectByCondition(runID string, edges []*Edge, pctx *PipelineContext, ctxSnap map[string]string) (*Edge, []ConditionEval, error) {
 	params := ExtractParamsFromGraphAttrs(e.graph.Attrs)
 	var triedFalse []ConditionEval
 	for _, edge := range edges {
@@ -85,6 +87,7 @@ func (e *Engine) selectByCondition(edges []*Edge, pctx *PipelineContext, ctxSnap
 		e.emit(PipelineEvent{
 			Type:      EventDecisionCondition,
 			Timestamp: time.Now(),
+			RunID:     runID,
 			NodeID:    edge.From,
 			Message:   fmt.Sprintf("condition %q on edge %s->%s evaluated to %v", edge.Condition, edge.From, edge.To, match),
 			Decision: &DecisionDetail{
@@ -96,7 +99,7 @@ func (e *Engine) selectByCondition(edges []*Edge, pctx *PipelineContext, ctxSnap
 			},
 		})
 		if match {
-			e.emitEdgeSelected(edge, "condition", ctxSnap)
+			e.emitEdgeSelected(runID, edge, "condition", ctxSnap)
 			return edge, nil, nil
 		}
 		triedFalse = append(triedFalse, ConditionEval{EdgeTo: edge.To, Condition: edge.Condition})
@@ -105,14 +108,14 @@ func (e *Engine) selectByCondition(edges []*Edge, pctx *PipelineContext, ctxSnap
 }
 
 // selectByLabel matches edges by the preferred label stored in context.
-func (e *Engine) selectByLabel(edges []*Edge, pctx *PipelineContext, ctxSnap map[string]string) *Edge {
+func (e *Engine) selectByLabel(runID string, edges []*Edge, pctx *PipelineContext, ctxSnap map[string]string) *Edge {
 	preferred, ok := pctx.Get(ContextKeyPreferredLabel)
 	if !ok || preferred == "" {
 		return nil
 	}
 	for _, edge := range edges {
 		if edge.Label == preferred {
-			e.emitEdgeSelected(edge, "label", ctxSnap)
+			e.emitEdgeSelected(runID, edge, "label", ctxSnap)
 			return edge
 		}
 	}
@@ -120,7 +123,7 @@ func (e *Engine) selectByLabel(edges []*Edge, pctx *PipelineContext, ctxSnap map
 }
 
 // selectBySuggested matches edges by handler-suggested next node IDs.
-func (e *Engine) selectBySuggested(edges []*Edge, pctx *PipelineContext, ctxSnap map[string]string) *Edge {
+func (e *Engine) selectBySuggested(runID string, edges []*Edge, pctx *PipelineContext, ctxSnap map[string]string) *Edge {
 	suggested, ok := pctx.Get(ContextKeySuggestedNextNodes)
 	if !ok || suggested == "" {
 		return nil
@@ -128,7 +131,7 @@ func (e *Engine) selectBySuggested(edges []*Edge, pctx *PipelineContext, ctxSnap
 	for _, edge := range edges {
 		for _, sid := range strings.Split(suggested, ",") {
 			if strings.TrimSpace(sid) == edge.To {
-				e.emitEdgeSelected(edge, "suggested", ctxSnap)
+				e.emitEdgeSelected(runID, edge, "suggested", ctxSnap)
 				return edge
 			}
 		}
@@ -140,7 +143,7 @@ func (e *Engine) selectBySuggested(edges []*Edge, pctx *PipelineContext, ctxSnap
 // lexically. Returns the selected edge plus the priority label used
 // ("weight" or "lexical"); the caller needs the priority to keep the
 // fallthrough event consistent with the edge-selected event.
-func (e *Engine) selectByWeight(edges []*Edge, pctx *PipelineContext, ctxSnap map[string]string) (*Edge, string, error) {
+func (e *Engine) selectByWeight(runID string, edges []*Edge, pctx *PipelineContext, ctxSnap map[string]string) (*Edge, string, error) {
 	var unconditional []*Edge
 	for _, edge := range edges {
 		if edge.Condition == "" {
@@ -166,12 +169,13 @@ func (e *Engine) selectByWeight(edges []*Edge, pctx *PipelineContext, ctxSnap ma
 		e.emit(PipelineEvent{
 			Type:      EventEdgeTiebreaker,
 			Timestamp: time.Now(),
+			RunID:     runID,
 			NodeID:    unconditional[0].From,
 			Message:   fmt.Sprintf("lexical tiebreaker used: %d unconditional edges from %q with equal weight; selected %q", len(unconditional), unconditional[0].From, unconditional[0].To),
 		})
 	}
 
-	e.emitEdgeSelected(unconditional[0], priority, ctxSnap)
+	e.emitEdgeSelected(runID, unconditional[0], priority, ctxSnap)
 	return unconditional[0], priority, nil
 }
 
@@ -188,10 +192,11 @@ func (e *Engine) noMatchingEdgesError(edges []*Edge, pctx *PipelineContext) erro
 }
 
 // emitEdgeSelected emits a decision_edge event recording which edge was selected and why.
-func (e *Engine) emitEdgeSelected(edge *Edge, priority string, ctxSnap map[string]string) {
+func (e *Engine) emitEdgeSelected(runID string, edge *Edge, priority string, ctxSnap map[string]string) {
 	e.emit(PipelineEvent{
 		Type:      EventDecisionEdge,
 		Timestamp: time.Now(),
+		RunID:     runID,
 		NodeID:    edge.From,
 		Message:   fmt.Sprintf("edge selected %s->%s via %s", edge.From, edge.To, priority),
 		Decision: &DecisionDetail{

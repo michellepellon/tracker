@@ -384,7 +384,7 @@ func (e *Engine) resumeSkipNode(s *runState, currentNodeID string, resumeVisited
 		return storedTo, false, nil
 	}
 
-	next, err := e.selectEdge(edges, s.pctx)
+	next, err := e.selectEdge(s.runID, edges, s.pctx)
 	if err != nil {
 		return "", false, fmt.Errorf("select edge from completed node %q: %w", currentNodeID, err)
 	}

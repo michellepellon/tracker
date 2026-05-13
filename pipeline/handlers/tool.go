@@ -344,18 +344,21 @@ func (h *ToolHandler) execAndBuildOutcome(ctx context.Context, node *pipeline.No
 	//
 	// CapturedBytes reports the size of the *trimmed* string written to
 	// ctx.tool_stdout / ctx.tool_stderr — the value routing conditions
-	// evaluate against — so it always matches the captured payload the
-	// operator sees. DroppedBytes is from the exec layer (pre-trim), so
-	// TotalBytes is computed from the original captured length plus
-	// dropped to preserve the pre-trim "what the process actually
-	// produced" total.
+	// evaluate against — so the captured-byte count operators see in
+	// `tracker diagnose` always matches the string actually in context.
+	// TotalBytes = CapturedBytes + DroppedBytes preserves the documented
+	// invariant in pipeline/events.go; this means the total reflects
+	// "what was captured (post-trim) + what the tail buffer dropped",
+	// not the raw process output (any trailing whitespace stripped by
+	// TrimRight is not accounted for here — that's a separate concern
+	// from truncation accounting).
 	if result.StdoutTruncated {
 		outcome.Truncations = append(outcome.Truncations, pipeline.TruncationDetail{
 			Stream:        "stdout",
 			Limit:         outputLimit,
 			CapturedBytes: len(stdout),
 			DroppedBytes:  result.StdoutBytesDropped,
-			TotalBytes:    len(result.Stdout) + result.StdoutBytesDropped,
+			TotalBytes:    len(stdout) + result.StdoutBytesDropped,
 		})
 	}
 	if result.StderrTruncated {
@@ -364,7 +367,7 @@ func (h *ToolHandler) execAndBuildOutcome(ctx context.Context, node *pipeline.No
 			Limit:         outputLimit,
 			CapturedBytes: len(stderr),
 			DroppedBytes:  result.StderrBytesDropped,
-			TotalBytes:    len(result.Stderr) + result.StderrBytesDropped,
+			TotalBytes:    len(stderr) + result.StderrBytesDropped,
 		})
 	}
 	if applyDeclaredWrites(node, outcome.ContextUpdates, stdout, "Tool stdout JSON") {
