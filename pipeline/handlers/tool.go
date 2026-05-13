@@ -342,32 +342,30 @@ func (h *ToolHandler) execAndBuildOutcome(ctx context.Context, node *pipeline.No
 	// preserves the routing-relevant trailing bytes; the event tells
 	// operators that earlier bytes were elided.
 	//
-	// CapturedBytes reports the size of the *trimmed* string written to
-	// ctx.tool_stdout / ctx.tool_stderr — the value routing conditions
-	// evaluate against — so the captured-byte count operators see in
-	// `tracker diagnose` always matches the string actually in context.
-	// TotalBytes = CapturedBytes + DroppedBytes preserves the documented
-	// invariant in pipeline/events.go; this means the total reflects
-	// "what was captured (post-trim) + what the tail buffer dropped",
-	// not the raw process output (any trailing whitespace stripped by
-	// TrimRight is not accounted for here — that's a separate concern
-	// from truncation accounting).
+	// Byte accounting reflects the *raw* (pre-trim) captured tail and
+	// dropped head — i.e., what the process actually emitted, not what
+	// ended up in ctx.tool_stdout / ctx.tool_stderr after TrimRight.
+	// This keeps the documented invariant from pipeline/events.go
+	// (TotalBytes = CapturedBytes + DroppedBytes) and matches the
+	// "how big was this stream" question operators ask. Trimming is a
+	// separate presentation concern for routing conditions; consumers
+	// that need the trimmed length can compute len(ctx.tool_stdout).
 	if result.StdoutTruncated {
 		outcome.Truncations = append(outcome.Truncations, pipeline.TruncationDetail{
 			Stream:        "stdout",
 			Limit:         outputLimit,
-			CapturedBytes: len(stdout),
+			CapturedBytes: len(result.Stdout),
 			DroppedBytes:  result.StdoutBytesDropped,
-			TotalBytes:    len(stdout) + result.StdoutBytesDropped,
+			TotalBytes:    len(result.Stdout) + result.StdoutBytesDropped,
 		})
 	}
 	if result.StderrTruncated {
 		outcome.Truncations = append(outcome.Truncations, pipeline.TruncationDetail{
 			Stream:        "stderr",
 			Limit:         outputLimit,
-			CapturedBytes: len(stderr),
+			CapturedBytes: len(result.Stderr),
 			DroppedBytes:  result.StderrBytesDropped,
-			TotalBytes:    len(stderr) + result.StderrBytesDropped,
+			TotalBytes:    len(result.Stderr) + result.StderrBytesDropped,
 		})
 	}
 	if applyDeclaredWrites(node, outcome.ContextUpdates, stdout, "Tool stdout JSON") {
