@@ -499,7 +499,7 @@ func (h *ManagerLoopHandler) Execute(ctx context.Context, node *pipeline.Node, p
 				fmt.Errorf("manager_loop: cancelled: %w", ctx.Err())
 
 		case msg := <-resultCh:
-			return h.handleChildResult(node.ID, msg, cycles, pctx)
+			return h.handleChildResult(ctx, node.ID, msg, cycles, pctx)
 
 		case <-pollTimer.C:
 			// If the child's result became ready concurrently with this
@@ -509,7 +509,7 @@ func (h *ManagerLoopHandler) Execute(ctx context.Context, node *pipeline.Node, p
 			// child already finished.
 			select {
 			case msg := <-resultCh:
-				return h.handleChildResult(node.ID, msg, cycles, pctx)
+				return h.handleChildResult(ctx, node.ID, msg, cycles, pctx)
 			default:
 			}
 
@@ -614,8 +614,51 @@ func (h *ManagerLoopHandler) Execute(ctx context.Context, node *pipeline.Node, p
 // result.Usage (when populated) is always propagated up via Outcome.ChildUsage so the
 // parent's Trace.AggregateUsage can fold child spend into per-provider rollups and
 // BudgetGuard checks at the next between-node boundary.
-func (h *ManagerLoopHandler) handleChildResult(nodeID string, msg engineResultMsg, cycles int, pctx *pipeline.PipelineContext) (pipeline.Outcome, error) {
+func (h *ManagerLoopHandler) handleChildResult(ctx context.Context, nodeID string, msg engineResultMsg, cycles int, pctx *pipeline.PipelineContext) (pipeline.Outcome, error) {
 	pctx.Set("stack.child.cycles", strconv.Itoa(cycles))
+
+	// Cancellation cascade: when the parent ctx is canceled, the child engine's
+	// handler returns ctx.Err(), which the engine wraps as a node-execution
+	// error and sends to resultCh alongside a non-nil result. The result's
+	// status is OutcomeFail (because executeNode treats the err as a node
+	// failure), but the err is the authoritative signal — the run was
+	// canceled, not a normal child failure. The poll-loop select races between
+	// `<-ctx.Done()` and `<-resultCh`; when resultCh wins, we must still
+	// surface the cancellation so the caller doesn't observe (OutcomeFail, nil),
+	// which would be visually indistinguishable from a normal handler-level
+	// failure that conditional edges could route on. Checked before any
+	// "failed" status/event writes so the audit signal stays consistent
+	// regardless of which select arm fired.
+	//
+	// Scope: only the manager_loop's own ctx being canceled counts as
+	// cancellation. We check `ctx.Err() != nil` rather than introspecting
+	// `msg.err` for context.{Canceled,DeadlineExceeded}, because a child
+	// handler can produce DeadlineExceeded from its own `context.WithTimeout`
+	// without the manager_loop's ctx ever being touched — that's an ordinary
+	// child-internal timeout and must route through normal failure edges, not
+	// be reclassified as a manager-loop cancellation. The previous (overly
+	// broad) check accepted any cancellation-shaped err and broke
+	// failure-edge routing for child-internal timeouts.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		pctx.Set("stack.child.status", "cancelled")
+		// Use ctx.Err() (typically `context.Canceled` / `context.DeadlineExceeded`)
+		// as the canonical cause for the audit message. The other cancellation
+		// path (the <-ctx.Done() arm in Execute) emits the same bare cause; the
+		// `msg.err` available here is the engine-wrapped form ("handler error
+		// at node ...: context canceled"), so using it would make the two paths
+		// produce different audit lines for the same observable event.
+		h.pipelineEvents.HandlePipelineEvent(pipeline.PipelineEvent{
+			Type:      pipeline.EventStageFailed,
+			Timestamp: time.Now(),
+			NodeID:    nodeID,
+			Message:   fmt.Sprintf("manager_loop: cancelled: %v", ctxErr),
+		})
+		out := pipeline.Outcome{Status: pipeline.OutcomeFail}
+		if msg.result != nil {
+			out.ChildUsage = msg.result.Usage
+		}
+		return out, fmt.Errorf("manager_loop: cancelled: %w", ctxErr)
+	}
 
 	// Engine may return both result + error (e.g. node failed with no failure edge).
 	// When a result is available, use its status/context rather than treating as a crash.
