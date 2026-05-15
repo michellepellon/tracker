@@ -2829,8 +2829,9 @@ Expected: clear error message including "git init", with non-zero exit code.
 ```bash
 TDIR=$(mktemp -d)
 cd "$TDIR"
-# Don't actually run the workflow (it would call LLMs); just trigger preflight.
-# `tracker doctor` is the cheapest way to confirm preflight wires through.
+# Doctor is READ-ONLY: it previews what runtime preflight would do but
+# does NOT mutate the workdir (no `git init` happens). We assert the
+# preview message instead of checking for `.git`.
 tracker doctor --git=init --allow-init <(echo 'workflow X
   goal: "x"
   requires: git
@@ -2843,12 +2844,19 @@ tracker doctor --git=init --allow-init <(echo 'workflow X
   edges
     S -> E
 ') 2>&1 | head -20
-ls -la "$TDIR"/.git
+# Expected: a "Git Requires" check with status ok and a message like
+# "workflow requires git; --git=init --allow-init would auto-init <path>"
+# plus the hint "tracker run will create .git here before the first
+# node executes". No `.git` directory is actually created — that
+# happens at `tracker run` time, not doctor.
+ls -la "$TDIR"/.git 2>&1 || echo "(expected) no .git — doctor is read-only"
 cd -
 rm -rf "$TDIR"
 ```
 
-Expected: `.git` exists after the command.
+Expected: the Git Requires check reports `ok` with an "auto-init would
+... at run start" message. **No `.git` is created** — doctor previews,
+runtime mutates.
 
 - [ ] **Step 9: Verify the user-facing error from the integration test is readable**
 

@@ -31,12 +31,18 @@ A separate brainstorming pass will design the managed-commits feature once prefl
 ```dippin
 workflow BuildProduct
   goal: "Build a feature end-to-end."
+  requires: git
   start: Decompose
   exit: Done
-  requires: git
   defaults:
     model: claude-opus-4-7
 ```
+
+> **Header field order:** `requires:` must appear before `start:` so the
+> built-in workflow catalog's hand-rolled header scanner picks it up. The
+> scanner halts at the first `start:` line to keep `tracker workflows`
+> startup cheap; the full dippin parser doesn't have that constraint but
+> we keep both in sync by convention.
 
 - The `requires:` list declares environmental dependencies the workflow expects to be satisfied at run start.
 - v0.29.0 implements **only `git`**. Unrecognized entries (`docker`, `gh`, `jq`, etc.) parse successfully and emit a single warning per entry: `tracker: requires "<dep>" is not yet implemented; ignoring`. This lets workflow authors forward-declare without breaking on older tracker versions.
