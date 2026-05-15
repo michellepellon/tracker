@@ -5,6 +5,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -246,6 +247,149 @@ func TestManagerLoopHandler_CtxCancellation(t *testing.T) {
 	}
 	if v, _ := pctx.Get("stack.child.status"); v != "cancelled" {
 		t.Errorf("expected stack.child.status=cancelled, got %q", v)
+	}
+}
+
+// TestManagerLoopHandler_HandleChildResult_CancellationPropagates pins the
+// cancellation contract on the resultCh-wins branch deterministically, without
+// relying on a goroutine-scheduling race.
+//
+// Background: when the parent ctx is canceled, both `<-ctx.Done()` and
+// `<-resultCh` in Execute's poll loop become ready, because the child engine's
+// handler returns ctx.Err() which the engine wraps and forwards. Go's select
+// is nondeterministic between ready cases, so under load `<-resultCh` can win.
+// Before the fix, handleChildResult discarded msg.err on the `result != nil`
+// non-success path and returned (OutcomeFail, nil) — silently corrupting
+// the audit trail by making a cancellation indistinguishable from a normal
+// child failure. The cancellation guard at the top of handleChildResult fixes
+// this; this test pins the contract directly by feeding in the synthetic
+// engineResultMsg the engine would produce on a cancellation cascade.
+func TestManagerLoopHandler_HandleChildResult_CancellationPropagates(t *testing.T) {
+	h := NewManagerLoopHandler(nil, nil, pipeline.PipelineNoopHandler, nil)
+	pctx := pipeline.NewPipelineContext()
+
+	// Simulate parent ctx cancellation — the gating signal that classifies
+	// the result as a manager-loop cancellation rather than a normal failure.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Mirror what the child engine emits when its handler returned ctx.Err():
+	// a non-nil result with Status=OutcomeFail plus a wrapped context.Canceled
+	// error (engine.go's executeNode does `fmt.Errorf("handler error at node %q: %w", ...)`).
+	msg := engineResultMsg{
+		result: &pipeline.EngineResult{Status: pipeline.OutcomeFail},
+		err:    fmt.Errorf("handler error at node %q: %w", "step", context.Canceled),
+	}
+
+	outcome, err := h.handleChildResult(ctx, "mgr", msg, 0, pctx)
+	if err == nil {
+		t.Fatal("expected non-nil error when parent ctx is canceled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected errors.Is(err, context.Canceled) to be true, got err=%v", err)
+	}
+	if outcome.Status != pipeline.OutcomeFail {
+		t.Errorf("expected OutcomeFail, got %q", outcome.Status)
+	}
+	if v, _ := pctx.Get("stack.child.status"); v != "cancelled" {
+		t.Errorf("expected stack.child.status=cancelled, got %q", v)
+	}
+}
+
+// TestManagerLoopHandler_HandleChildResult_DeadlineExceededFromParentCtx pins
+// the parent-ctx-deadline case: the manager_loop's own ctx hit its deadline,
+// so handleChildResult sees ctx.Err() == context.DeadlineExceeded and must
+// classify the result as cancellation. (Note: the gating now reads ctx.Err()
+// rather than introspecting msg.err — so msg.err's shape doesn't drive the
+// decision, which is the point of the P1 fix.)
+func TestManagerLoopHandler_HandleChildResult_DeadlineExceededFromParentCtx(t *testing.T) {
+	h := NewManagerLoopHandler(nil, nil, pipeline.PipelineNoopHandler, nil)
+	pctx := pipeline.NewPipelineContext()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	msg := engineResultMsg{
+		result: &pipeline.EngineResult{Status: pipeline.OutcomeFail},
+		err:    fmt.Errorf("handler error at node %q: %w", "step", context.DeadlineExceeded),
+	}
+
+	outcome, err := h.handleChildResult(ctx, "mgr", msg, 0, pctx)
+	if err == nil {
+		t.Fatal("expected non-nil error when parent ctx hit its deadline")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected errors.Is(err, context.DeadlineExceeded) to be true, got err=%v", err)
+	}
+	if outcome.Status != pipeline.OutcomeFail {
+		t.Errorf("expected OutcomeFail, got %q", outcome.Status)
+	}
+	if v, _ := pctx.Get("stack.child.status"); v != "cancelled" {
+		t.Errorf("expected stack.child.status=cancelled, got %q", v)
+	}
+}
+
+// TestManagerLoopHandler_HandleChildResult_ChildInternalDeadlineNotCancellation
+// pins the P1 fix from PR review: a child handler's own context.WithTimeout
+// hitting DeadlineExceeded while the manager_loop's ctx is still alive must
+// NOT be reclassified as a manager-loop cancellation. The expected behavior
+// is "ordinary child failure" — falls through to the result-driven branch,
+// returns (OutcomeFail, nil), and conditional failure edges can route on it.
+// Regression guard for the over-broad cancellation classification that
+// returned a non-nil handler error and short-circuited failure-edge routing
+// (Codex P1 review comment 3242442233).
+func TestManagerLoopHandler_HandleChildResult_ChildInternalDeadlineNotCancellation(t *testing.T) {
+	h := NewManagerLoopHandler(nil, nil, pipeline.PipelineNoopHandler, nil)
+	pctx := pipeline.NewPipelineContext()
+
+	// Parent ctx is ALIVE. Simulates the child engine surfacing its own
+	// internal `context.WithTimeout` firing while the manager loop is fine.
+	ctx := context.Background()
+
+	msg := engineResultMsg{
+		result: &pipeline.EngineResult{Status: pipeline.OutcomeFail},
+		err:    fmt.Errorf("handler error at node %q: %w", "step", context.DeadlineExceeded),
+	}
+
+	outcome, err := h.handleChildResult(ctx, "mgr", msg, 0, pctx)
+	if err != nil {
+		t.Errorf("child-internal DeadlineExceeded with parent ctx alive must NOT return handler error, got %v", err)
+	}
+	if outcome.Status != pipeline.OutcomeFail {
+		t.Errorf("expected OutcomeFail (normal failure-edge routing), got %q", outcome.Status)
+	}
+	if v, _ := pctx.Get("stack.child.status"); v != "failed" {
+		t.Errorf("expected stack.child.status=failed (NOT cancelled — parent ctx wasn't canceled), got %q", v)
+	}
+}
+
+// TestManagerLoopHandler_HandleChildResult_NonCancellationErrPreserved pins
+// the other half of the contract: when msg.err is a non-cancellation error
+// (e.g. strict-failure-edges informational error) and parent ctx is alive,
+// the existing behavior is preserved — the handler returns (OutcomeFail, nil)
+// and uses the result's status/context, not the err.
+func TestManagerLoopHandler_HandleChildResult_NonCancellationErrPreserved(t *testing.T) {
+	h := NewManagerLoopHandler(nil, nil, pipeline.PipelineNoopHandler, nil)
+	pctx := pipeline.NewPipelineContext()
+
+	ctx := context.Background()
+
+	msg := engineResultMsg{
+		result: &pipeline.EngineResult{Status: pipeline.OutcomeFail},
+		// Synthetic strict-failure-edges-style error: not wrapped around any
+		// context error, no %w on a cancellation sentinel.
+		err: fmt.Errorf("node %q failed with no conditional edges to handle failure", "step"),
+	}
+
+	outcome, err := h.handleChildResult(ctx, "mgr", msg, 0, pctx)
+	if err != nil {
+		t.Errorf("expected nil error (informational err discarded for non-cancellation), got %v", err)
+	}
+	if outcome.Status != pipeline.OutcomeFail {
+		t.Errorf("expected OutcomeFail, got %q", outcome.Status)
+	}
+	if v, _ := pctx.Get("stack.child.status"); v != "failed" {
+		t.Errorf("expected stack.child.status=failed (non-cancellation path), got %q", v)
 	}
 }
 
