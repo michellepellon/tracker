@@ -418,6 +418,9 @@ func termLines(s string, width int) int {
 // count. When truncated, the result is prefixed with "…" so the user can see
 // that earlier content was cut off.
 func capPartialText(s string, width, maxRows int) string {
+	if maxRows <= 0 {
+		return s
+	}
 	if width <= 0 {
 		width = 80
 	}
@@ -570,9 +573,12 @@ func (al *AgentLog) buildPartials(indicator string, width int) ([]string, int) {
 		if s.current.Len() > 0 {
 			prefix := ""
 			if len(al.streams) > 1 {
-				prefix = Styles.Muted.Render(nodeID+": ") + ""
+				prefix = Styles.Muted.Render(nodeID + ": ")
 			}
-			raw := capPartialText(s.current.String(), width, maxPartialRows)
+			// Subtract the prefix's visual width so the first wrapped row of the
+			// partial cannot overflow the cap by an extra line.
+			effectiveWidth := width - lipgloss.Width(prefix)
+			raw := capPartialText(s.current.String(), effectiveWidth, maxPartialRows)
 			line := prefix + Styles.PrimaryText.Render(raw)
 			partials = append(partials, line)
 			bottomRows += termLines(line, width)

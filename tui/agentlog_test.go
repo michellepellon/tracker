@@ -295,6 +295,15 @@ func TestCapPartialText(t *testing.T) {
 	if !strings.HasSuffix(got, tail) {
 		t.Errorf("truncated text must keep the tail, got: %q", got[len(got)-10:])
 	}
+
+	// maxRows <= 0 — must return the input unchanged without panicking.
+	longInput := strings.Repeat("a", 600)
+	if got := capPartialText(longInput, 80, 0); got != longInput {
+		t.Errorf("maxRows=0 should return s unchanged")
+	}
+	if got := capPartialText(longInput, 80, -1); got != longInput {
+		t.Errorf("maxRows=-1 should return s unchanged")
+	}
 }
 
 func TestAgentLogLargePartialCapped(t *testing.T) {
@@ -328,5 +337,34 @@ func TestAgentLogLargePartialCapped(t *testing.T) {
 	// The tail of the text (most recent content) must still be visible.
 	if !strings.Contains(view, "word") {
 		t.Errorf("expected partial text still visible after capping, got:\n%s", view)
+	}
+}
+
+// TestAgentLogMultiStreamPartialCapped checks that when multiple node streams
+// are active the prefix width is accounted for and each partial still fits
+// within maxPartialRows terminal rows (not maxPartialRows+1).
+func TestAgentLogMultiStreamPartialCapped(t *testing.T) {
+	store := NewStateStore(nil)
+	tr := NewThinkingTracker()
+	const viewportHeight = 20
+	const width = 80
+	al := NewAgentLog(store, tr, viewportHeight)
+	al.SetSize(width, viewportHeight)
+
+	// Two simultaneous streams — buildPartials will prepend a "nodeID: " prefix.
+	longText := strings.Repeat("word ", 100) // 500 chars, ~7 rows at width=80
+	al.Update(MsgTextChunk{NodeID: "n1", Text: longText})
+	al.Update(MsgTextChunk{NodeID: "n2", Text: longText})
+
+	// Inspect the partials directly: each one must occupy at most maxPartialRows rows.
+	partials, _ := al.buildPartials(" ", width)
+	if len(partials) != 2 {
+		t.Fatalf("expected 2 partials, got %d", len(partials))
+	}
+	for i, p := range partials {
+		rows := termLines(p, width)
+		if rows > maxPartialRows {
+			t.Errorf("partial[%d]: %d rows exceeds maxPartialRows=%d:\n%s", i, rows, maxPartialRows, stripANSI(p))
+		}
 	}
 }
