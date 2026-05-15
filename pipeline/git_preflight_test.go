@@ -84,6 +84,27 @@ func TestCheckGit_IsRepo(t *testing.T) {
 // `--is-inside-work-tree` so bare repos correctly classify as isRepo=false,
 // and `requires: git` workflows fail fast at preflight with the same
 // remediation message as a plain non-repo directory.
+// TestCheckGit_CtxCancellationPropagates pins the PR #235 round-4 review fix
+// (CodeRabbit + Copilot): pre-fix, checkGit swallowed all git-subprocess
+// errors as "not a repo," so a canceled ctx looked the same as a non-repo
+// dir. Now ctx cancellation propagates as the returned error so Preflight
+// and Doctor can surface the real cause rather than reporting
+// ErrGitWorkdirNotRepo.
+func TestCheckGit_CtxCancellationPropagates(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	mustGitInit(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled before checkGit runs
+	_, _, err := checkGit(ctx, dir)
+	if err == nil {
+		t.Fatal("expected ctx cancellation to surface as non-nil error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want errors.Is(err, context.Canceled), got %v", err)
+	}
+}
+
 func TestCheckGit_BareRepoIsNotRepo(t *testing.T) {
 	requireGit(t)
 	bare := filepath.Join(t.TempDir(), "bare.git")
@@ -110,6 +131,26 @@ func TestSafetyLatches_HomeRefused(t *testing.T) {
 	}
 	if err := safetyLatches(context.Background(), home); err == nil {
 		t.Fatalf("expected refusal for home dir")
+	}
+}
+
+// TestSafetyLatches_HomeRefused_ViaSymlink pins the PR #235 round-4 fix
+// from Copilot: pre-fix, a symlink pointing at $HOME bypassed the latch
+// because the equality compared cleaned-but-unresolved paths. Now both
+// sides are EvalSymlinks-resolved before comparison so `git -C <symlink>
+// init` can't sneak past the refusal.
+func TestSafetyLatches_HomeRefused_ViaSymlink(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir on this system: %v", err)
+	}
+	linkDir := t.TempDir()
+	link := filepath.Join(linkDir, "home-link")
+	if err := os.Symlink(home, link); err != nil {
+		t.Skipf("cannot create symlink (likely Windows without dev mode): %v", err)
+	}
+	if err := safetyLatches(context.Background(), link); err == nil {
+		t.Fatalf("expected refusal for symlink-into-home; %q resolves to %q which equals $HOME", link, home)
 	}
 }
 
@@ -155,6 +196,27 @@ func TestSafetyLatches_NestedRefused_BareRepo(t *testing.T) {
 	}
 	if err := safetyLatches(context.Background(), bare); err == nil {
 		t.Fatalf("expected refusal for bare repo dir")
+	}
+}
+
+// TestSafetyLatches_CtxCancellationPropagates pins the PR #235 round-4
+// review fix: pre-fix, safetyLatches swallowed `cmd.Output()` errors and
+// reported "not nested" even when the caller canceled. Now ctx
+// cancellation surfaces as a wrapped error so callers can abort cleanly.
+func TestSafetyLatches_CtxCancellationPropagates(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := safetyLatches(ctx, dir)
+	if err == nil {
+		t.Fatal("expected ctx cancellation to surface as non-nil error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want errors.Is(err, context.Canceled), got %v", err)
+	}
+	if !errors.Is(err, ErrGitAutoInitRefused) {
+		t.Errorf("want errors.Is(err, ErrGitAutoInitRefused) too (latch context), got %v", err)
 	}
 }
 

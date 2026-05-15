@@ -177,6 +177,19 @@ func buildWorkdirNotRepoMessage(workDir string) string {
 	}, "\n")
 }
 
+// resolveSymlinksOrFallback returns filepath.EvalSymlinks(p) on success,
+// or p unchanged if EvalSymlinks fails (e.g. p doesn't exist yet, which
+// is the common case for the --git=init auto-init path). The fallback
+// keeps the latch from silently failing-open when the workdir hasn't
+// been created — we'd rather compare unresolved paths than skip the
+// $HOME check entirely.
+func resolveSymlinksOrFallback(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
+}
+
 // SafetyLatches returns a wrapped ErrGitAutoInitRefused when auto-init would
 // be unsafe at workDir, or nil if it would proceed. Exported so the tracker
 // doctor preview check can model --git=init --allow-init behavior without
@@ -252,16 +265,28 @@ func safetyLatches(ctx context.Context, workDir string) error {
 	if err != nil {
 		return fmt.Errorf("%w: resolve absolute path: %v", ErrGitAutoInitRefused, err)
 	}
-	if home, err := os.UserHomeDir(); err == nil && abs == filepath.Clean(home) {
-		return fmt.Errorf("%w: workdir equals $HOME (%s).\n\n  Initializing a repo at $HOME would place every file under your home tree into the repo's tracking space. cd into a project subdirectory first, or run `git init` here manually if this really is what you want.", ErrGitAutoInitRefused, home)
+	// Resolve symlinks for both workdir and $HOME / root before comparing.
+	// Pre-fix, `~/symlink-to-home` would equal `~/symlink-to-home` after
+	// filepath.Clean but not equal `$HOME` after symlink resolution —
+	// `git -C ~/symlink-to-home init` would then initialize the home tree
+	// despite the safety refusal. EvalSymlinks errors are tolerated (e.g.
+	// the dir doesn't exist yet for the auto-init path) — we fall back to
+	// the unresolved comparison in that case so a missing path doesn't
+	// silently pass the latch.
+	absResolved := resolveSymlinksOrFallback(abs)
+	if home, err := os.UserHomeDir(); err == nil {
+		homeResolved := resolveSymlinksOrFallback(filepath.Clean(home))
+		if absResolved == homeResolved {
+			return fmt.Errorf("%w: workdir equals $HOME (%s).\n\n  Initializing a repo at $HOME would place every file under your home tree into the repo's tracking space. cd into a project subdirectory first, or run `git init` here manually if this really is what you want.", ErrGitAutoInitRefused, home)
+		}
 	}
 	// Filesystem-root refusal must be volume-aware for Windows. On Unix,
 	// filepath.VolumeName("/") returns "" and the equality reduces to
 	// abs == "/". On Windows, filepath.Abs("C:\\") returns "C:\" and the
 	// equality compares against "C:\\" (VolumeName "C:" + separator "\\"),
 	// matching the documented "/" refusal across platforms.
-	if abs == filepath.VolumeName(abs)+string(filepath.Separator) {
-		return fmt.Errorf("%w: workdir is filesystem root (%s).\n\n  cd into a project subdirectory first.", ErrGitAutoInitRefused, abs)
+	if absResolved == filepath.VolumeName(absResolved)+string(filepath.Separator) {
+		return fmt.Errorf("%w: workdir is filesystem root (%s).\n\n  cd into a project subdirectory first.", ErrGitAutoInitRefused, absResolved)
 	}
 	// Use safetyLatches's `--git-dir` check (NOT `--is-inside-work-tree` like
 	// the requires:git satisfaction probe in checkGit) because we want to
@@ -272,16 +297,47 @@ func safetyLatches(ctx context.Context, workDir string) error {
 	// git context where running `git init` would create a confusing
 	// duplicate?" (any git-dir resolution counts).
 	if _, lerr := exec.LookPath("git"); lerr != nil {
-		return nil
+		// "git not found" is a benign reason to skip — caller should already
+		// have surfaced ErrGitNotInstalled at the checkGit layer if it
+		// matters. Other LookPath failures (permission denied, IO error,
+		// PATH search short-circuit) are unexpected and propagated so
+		// safetyLatches doesn't silently report "safe to init" when it
+		// actually can't make the determination.
+		if errors.Is(lerr, exec.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("%w: resolve git in PATH: %v", ErrGitAutoInitRefused, lerr)
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", abs, "rev-parse", "--git-dir")
 	cmd.Env = gitSafeEnv()
-	if out, err := cmd.Output(); err == nil && len(out) > 0 {
+	out, runErr := cmd.Output()
+	if runErr != nil {
+		// Distinguish three cases:
+		//   - ctx cancellation: propagate so callers can abort cleanly
+		//   - normal exit-non-zero (not inside a repo): safe to init, return nil
+		//   - everything else (signal, I/O error): unexpected, propagate
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("%w: %w", ErrGitAutoInitRefused, ctxErr)
+		}
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			return nil // expected — workdir is not a repo
+		}
+		return fmt.Errorf("%w: git rev-parse --git-dir: %v", ErrGitAutoInitRefused, runErr)
+	}
+	if len(out) > 0 {
 		// Inside some kind of repo. Distinguish bare vs work-tree for a
 		// clearer error message.
 		bareCmd := exec.CommandContext(ctx, "git", "-C", abs, "rev-parse", "--is-bare-repository")
 		bareCmd.Env = gitSafeEnv()
-		bareOut, _ := bareCmd.Output()
+		bareOut, bareErr := bareCmd.Output()
+		if bareErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("%w: %w", ErrGitAutoInitRefused, ctxErr)
+			}
+			// bareErr is an ExitError → couldn't determine bare-ness; default
+			// to the non-bare message which is still accurate ("inside a repo").
+		}
 		if strings.TrimSpace(string(bareOut)) == "true" {
 			return fmt.Errorf("%w: workdir is inside a bare git repository.\n\n  Bare repositories have no working tree, so workflows that need to commit/branch/merge can't run here. cd into a checkout of this repo (e.g. clone or worktree) and run from there.", ErrGitAutoInitRefused)
 		}
@@ -308,7 +364,12 @@ func safetyLatches(ctx context.Context, workDir string) error {
 // which is the bug the preflight is meant to prevent.
 func checkGit(ctx context.Context, workDir string) (installed bool, isRepo bool, err error) {
 	if _, lerr := exec.LookPath("git"); lerr != nil {
-		return false, false, nil
+		// Only ErrNotFound qualifies as "not installed." Other lookups can
+		// fail for I/O reasons; surface those per the documented contract.
+		if errors.Is(lerr, exec.ErrNotFound) {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("locate git in PATH: %w", lerr)
 	}
 	installed = true
 	cmd := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "--is-inside-work-tree")
@@ -317,8 +378,20 @@ func checkGit(ctx context.Context, workDir string) (installed bool, isRepo bool,
 	// Exits non-zero (and writes to stderr) when not inside a repo. Inside a
 	// bare repo, exits 0 but prints "false". Inside a normal repo or linked
 	// worktree, exits 0 and prints "true".
-	if runErr == nil && strings.TrimSpace(string(out)) == "true" {
-		isRepo = true
+	if runErr == nil {
+		if strings.TrimSpace(string(out)) == "true" {
+			isRepo = true
+		}
+		return installed, isRepo, nil
 	}
-	return installed, isRepo, nil
+	// Distinguish cancellation (must propagate) from ExitError (expected
+	// "not a repo") from unexpected execution failures (propagate).
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return installed, false, ctxErr
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		return installed, false, nil // expected — workdir is not a repo
+	}
+	return installed, false, fmt.Errorf("git rev-parse --is-inside-work-tree: %w", runErr)
 }
