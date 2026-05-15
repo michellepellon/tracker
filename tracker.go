@@ -186,6 +186,10 @@ func NewEngine(source string, cfg Config) (*Engine, error) {
 		return nil, err
 	}
 
+	if err := runPreflight(graph, cfg, workDir); err != nil {
+		return nil, err
+	}
+
 	if err := applyResumeRunID(&cfg, workDir); err != nil {
 		return nil, err
 	}
@@ -196,6 +200,25 @@ func NewEngine(source string, cfg Config) (*Engine, error) {
 	}
 
 	return buildEngine(graph, cfg, workDir, client, completer)
+}
+
+// runPreflight invokes pipeline.Preflight with the resolved policy from cfg.
+// Returns nil if the workflow doesn't declare any deps (and CLI isn't
+// forcing the check), or if the policy downgrades the check to a warning.
+// Library callers default to non-interactive; the CLI overrides via its
+// own preflight call (cmd/tracker/run.go) where stdin TTY detection lives.
+func runPreflight(graph *pipeline.Graph, cfg Config, workDir string) error {
+	policy, allowInit := ResolveGitConfig(cfg)
+	return pipeline.Preflight(context.Background(), pipeline.PreflightConfig{
+		WorkDir:        workDir,
+		Requires:       graph.RequiredDeps(),
+		Policy:         policy,
+		AllowInit:      allowInit,
+		InteractiveTTY: false,
+		Warner: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
+		},
+	})
 }
 
 // applyResumeRunID resolves Config.ResumeRunID to a concrete checkpoint path
