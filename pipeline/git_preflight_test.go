@@ -14,9 +14,11 @@ import (
 )
 
 // mustGit runs a git command in dir with deterministic author identity,
-// failing the test if it returns a non-zero exit code.
+// failing the test if it returns a non-zero exit code. Skips if git is
+// not on PATH (delegates to requireGit from git_artifacts_test.go).
 func mustGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	requireGit(t)
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
@@ -28,9 +30,12 @@ func mustGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// mustGitInit creates a git repo at dir or fails the test.
+// mustGitInit creates a git repo at dir or fails the test. Skips when
+// git is not available on PATH (matches the requireGit pattern in
+// git_artifacts_test.go) so `go test ./...` remains portable.
 func mustGitInit(t *testing.T, dir string) {
 	t.Helper()
+	requireGit(t)
 	cmd := exec.Command("git", "init", "-q")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -39,6 +44,7 @@ func mustGitInit(t *testing.T, dir string) {
 }
 
 func TestCheckGit_Installed(t *testing.T) {
+	requireGit(t)
 	installed, _, err := checkGit(t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -79,6 +85,7 @@ func TestCheckGit_IsRepo(t *testing.T) {
 // and `requires: git` workflows fail fast at preflight with the same
 // remediation message as a plain non-repo directory.
 func TestCheckGit_BareRepoIsNotRepo(t *testing.T) {
+	requireGit(t)
 	bare := filepath.Join(t.TempDir(), "bare.git")
 	cmd := exec.Command("git", "init", "--bare", "-q", bare)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -140,6 +147,7 @@ func TestSafetyLatches_NestedRefused_Worktree(t *testing.T) {
 }
 
 func TestSafetyLatches_NestedRefused_BareRepo(t *testing.T) {
+	requireGit(t)
 	bare := filepath.Join(t.TempDir(), "bare.git")
 	cmd := exec.Command("git", "init", "--bare", "-q", bare)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -158,6 +166,7 @@ func TestSafetyLatches_CleanDirAllowed(t *testing.T) {
 }
 
 func TestRunAutoInit_Success(t *testing.T) {
+	requireGit(t)
 	dir := t.TempDir()
 	if err := runAutoInit(dir, true, false, nil); err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -192,6 +201,7 @@ func TestRunAutoInit_NeedsAllowInit_NonInteractive(t *testing.T) {
 }
 
 func TestRunAutoInit_InteractiveYesAccepted(t *testing.T) {
+	requireGit(t)
 	dir := t.TempDir()
 	yes := func(string) bool { return true }
 	if err := runAutoInit(dir, false /*allowInit*/, true /*interactive*/, yes); err != nil {
@@ -302,6 +312,7 @@ func TestPreflight_RequireOverrideNoRequires(t *testing.T) {
 }
 
 func TestPreflight_AutoInit_Success(t *testing.T) {
+	requireGit(t)
 	dir := t.TempDir()
 	err := Preflight(context.Background(), PreflightConfig{
 		WorkDir:   dir,

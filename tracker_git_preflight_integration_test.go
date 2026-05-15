@@ -14,6 +14,17 @@ import (
 	"github.com/2389-research/tracker/pipeline"
 )
 
+// requireGit skips the calling test when `git` is not on PATH. Used by the
+// git-dependent preflight tests in this package so `go test ./...` remains
+// portable on hosts without git installed. Matches the same-named helper in
+// pipeline/git_artifacts_test.go.
+func requireGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH, skipping git-dependent preflight test")
+	}
+}
+
 const integrationFixtureRequiresGit = `workflow PreflightIntegration
   goal: "integration test"
   requires: git
@@ -35,6 +46,7 @@ const integrationFixtureRequiresGit = `workflow PreflightIntegration
 // no LLM client setup, no network, no node execution. The error message
 // must include the user-facing remediation copy (git init / --git=off).
 func TestIntegration_Preflight_NoRepoFailsBeforeNodeExecutes(t *testing.T) {
+	requireGit(t)
 	dir := t.TempDir()
 	cfg := Config{WorkingDir: dir}
 	_, err := NewEngine(integrationFixtureRequiresGit, cfg)
@@ -62,6 +74,7 @@ func TestIntegration_Preflight_NoRepoFailsBeforeNodeExecutes(t *testing.T) {
 // fail for unrelated reasons (no API key) — the assertion is only that
 // preflight is no longer the failure point.
 func TestIntegration_Preflight_GitInitClears(t *testing.T) {
+	requireGit(t)
 	dir := t.TempDir()
 	cmd := exec.Command("git", "init", "-q")
 	cmd.Dir = dir
@@ -79,6 +92,7 @@ func TestIntegration_Preflight_GitInitClears(t *testing.T) {
 // --allow-init latch. Confirms the side effect (a .git directory appears)
 // happens at preflight time.
 func TestIntegration_Preflight_AutoInitInTempDir(t *testing.T) {
+	requireGit(t)
 	dir := t.TempDir()
 	cfg := Config{
 		WorkingDir: dir,
@@ -95,6 +109,9 @@ func TestIntegration_Preflight_AutoInitInTempDir(t *testing.T) {
 // TestIntegration_Preflight_OffBypassesEverything confirms --git=off bypasses
 // even when the workflow explicitly declares requires:git AND the workdir
 // isn't a repo. Belt-and-suspenders escape hatch.
+//
+// Intentionally does NOT call requireGit: --git=off bypasses git checks
+// entirely, so this test should pass even on hosts without git installed.
 func TestIntegration_Preflight_OffBypassesEverything(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{

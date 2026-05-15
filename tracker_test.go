@@ -967,6 +967,7 @@ const preflightTestPipelineRequiresGit = `workflow PreflightFixture
 `
 
 func TestNewEngine_PreflightFailsWhenForceRequireAndNotRepo(t *testing.T) {
+	requireGit(t)
 	dir := t.TempDir()
 	cfg := Config{
 		WorkingDir: dir,
@@ -982,6 +983,7 @@ func TestNewEngine_PreflightFailsWhenForceRequireAndNotRepo(t *testing.T) {
 }
 
 func TestNewEngine_PreflightPassesAfterGitInit(t *testing.T) {
+	requireGit(t)
 	dir := t.TempDir()
 	cmd := exec.Command("git", "init", "-q")
 	cmd.Dir = dir
@@ -1000,6 +1002,7 @@ func TestNewEngine_PreflightPassesAfterGitInit(t *testing.T) {
 }
 
 func TestNewEngine_PreflightBypassedWithGitOff(t *testing.T) {
+	// Off should bypass even when git isn't installed — no requireGit guard.
 	dir := t.TempDir()
 	cfg := Config{
 		WorkingDir: dir,
@@ -1018,6 +1021,7 @@ func TestNewEngine_PreflightBypassedWithGitOff(t *testing.T) {
 // ErrGitWorkdirNotRepo without any CLI override (auto policy honors
 // workflow's declared requires).
 func TestNewEngine_PreflightFailsFromSourceLevelRequires(t *testing.T) {
+	requireGit(t)
 	dir := t.TempDir()
 	cfg := Config{WorkingDir: dir} // auto policy
 	_, err := NewEngine(preflightTestPipelineRequiresGit, cfg)
@@ -1030,6 +1034,7 @@ func TestNewEngine_PreflightFailsFromSourceLevelRequires(t *testing.T) {
 }
 
 func TestNewEngine_PreflightPassesFromSourceLevelRequiresAfterInit(t *testing.T) {
+	requireGit(t)
 	dir := t.TempDir()
 	cmd := exec.Command("git", "init", "-q")
 	cmd.Dir = dir

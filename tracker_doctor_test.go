@@ -514,6 +514,7 @@ func TestDoctor_GitRequires_InitAllowInitPreviewsOK(t *testing.T) {
 // policy), not OK, so the user gets the actionable remediation before
 // running the workflow.
 func TestDoctor_GitRequires_BareRepoReportsError(t *testing.T) {
+	requireGit(t)
 	tmp := t.TempDir()
 	bare := filepath.Join(tmp, "bare.git")
 	cmd := exec.Command("git", "init", "--bare", "-q", bare)
@@ -589,6 +590,7 @@ func TestDoctor_GitRequires_SourceLevelSatisfied(t *testing.T) {
 
 func mustGitInitForDoctor(t *testing.T, dir string) {
 	t.Helper()
+	requireGit(t)
 	cmd := exec.Command("git", "init", "-q")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {

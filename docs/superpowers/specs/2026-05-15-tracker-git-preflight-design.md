@@ -8,7 +8,7 @@
 
 Workflows like `build_product.dip` instruct the LLM to `git commit` mid-run. Users frequently start a multi-hour, $20–$100 run in a directory that isn't a git repository or that lacks `git` in PATH. The pipeline burns the LLM spend and then dies at commit time. This spec adds a cheap, fast preflight check that fails the run *in seconds* instead of *hours*, with actionable remediation copy.
 
-The spec also introduces a generic `requires:` workflow header keyword so workflows can declare their environmental dependencies in a way that scales beyond git (`requires: [docker, gh, jq]` are future extensions on the same mechanism).
+The spec also introduces a generic `requires:` workflow header keyword so workflows can declare their environmental dependencies in a way that scales beyond git (`requires: docker, gh, jq` are future extensions on the same mechanism). Syntax is a bare comma-separated list — dippin-lang's lexer does not support `[...]` bracket syntax (parser/lexer.go:29), so the list form matches the existing `reads:` / `writes:` precedent.
 
 ## Non-goals (deferred to v0.30.0)
 
@@ -33,7 +33,7 @@ workflow BuildProduct
   goal: "Build a feature end-to-end."
   start: Decompose
   exit: Done
-  requires: [git]
+  requires: git
   defaults:
     model: claude-opus-4-7
 ```
@@ -53,10 +53,10 @@ workflow BuildProduct
 
 | Flag value | Behavior |
 |---|---|
-| (omitted) | `auto`: respect the workflow's `requires:` block. Workflow says `requires: [git]` and env doesn't satisfy → hard-error. Workflow says nothing → no check. |
+| (omitted) | `auto`: respect the workflow's `requires:` block. Workflow says `requires: git` and env doesn't satisfy → hard-error. Workflow says nothing → no check. |
 | `--git=off` | Bypass all git checks. Escape hatch for users running tracker on workflows whose authors haven't declared dependencies correctly. |
-| `--git=warn` | Downgrade hard-fail to advisory warning. Workflow's `requires: [git]` becomes a warning instead of an error, run continues. |
-| `--git=require` | Force hard-fail. Even workflows that don't declare `requires: [git]` get the check applied. |
+| `--git=warn` | Downgrade hard-fail to advisory warning. Workflow's `requires: git` becomes a warning instead of an error, run continues. |
+| `--git=require` | Force hard-fail. Even workflows that don't declare `requires: git` get the check applied. |
 | `--git=init` | Same as `require`, plus offer to auto-init the workdir as a git repo if missing. Requires `--allow-init` as a second latch. |
 | `--allow-init` | Required when `--git=init` is set in a non-interactive run. Interactive runs (stdin is a TTY) can answer a `[Y/n]` prompt instead. |
 
@@ -243,18 +243,18 @@ tracker: refusing to run `git init` here — a parent directory is already a git
 ### Unit tests (`pipeline/git_preflight_test.go`)
 
 - **Happy path: git installed + workdir is repo + no `requires:` declared** → no error
-- **Happy path: git installed + workdir is repo + `requires: [git]`** → no error
+- **Happy path: git installed + workdir is repo + `requires: git`** → no error
 - **Happy path: git missing + no `requires:` declared + `--git=auto`** → no error (no opinion)
-- **Hard fail: git missing + `requires: [git]` + `--git=auto`** → `ErrGitNotInstalled`
-- **Hard fail: workdir not repo + `requires: [git]` + `--git=auto`** → `ErrGitWorkdirNotRepo`
-- **Warn instead: workdir not repo + `requires: [git]` + `--git=warn`** → no error, warning emitted via `Warner`
+- **Hard fail: git missing + `requires: git` + `--git=auto`** → `ErrGitNotInstalled`
+- **Hard fail: workdir not repo + `requires: git` + `--git=auto`** → `ErrGitWorkdirNotRepo`
+- **Warn instead: workdir not repo + `requires: git` + `--git=warn`** → no error, warning emitted via `Warner`
 - **CLI override: workdir not repo + no `requires:` + `--git=require`** → `ErrGitWorkdirNotRepo`
 - **Auto-init success: workdir not repo + `--git=init --allow-init`** → no error, `.git/` created
 - **Auto-init refused (home): cwd == $HOME + `--git=init --allow-init`** → `ErrGitAutoInitRefused`
 - **Auto-init refused (nested): cwd inside existing repo's subdir + `--git=init --allow-init`** → `ErrGitAutoInitRefused`
 - **Auto-init refused (no latch): `--git=init` without `--allow-init` and not interactive** → `ErrGitAutoInitRefused` with "pass --allow-init" message
-- **Unrecognized requires: `requires: [docker]`** → no error, warning emitted ("not yet implemented")
-- **Off bypass: `requires: [git]` + git missing + `--git=off`** → no error, no warning
+- **Unrecognized requires: `requires: docker`** → no error, warning emitted ("not yet implemented")
+- **Off bypass: `requires: git` + git missing + `--git=off`** → no error, no warning
 
 ### Doctor tests (`tracker_doctor_test.go`)
 
@@ -271,7 +271,7 @@ tracker: refusing to run `git init` here — a parent directory is already a git
 
 ### Integration test
 
-A fixture pipeline declaring `requires: [git]`, run end-to-end in a temp directory:
+A fixture pipeline declaring `requires: git`, run end-to-end in a temp directory:
 
 - with no git repo → fails at preflight, never invokes any node, surfaces the expected error message verbatim
 - with `git init` first → runs through, no preflight error
@@ -279,17 +279,17 @@ A fixture pipeline declaring `requires: [git]`, run end-to-end in a temp directo
 ## Migration & rollout
 
 - **Built-in workflows updated in the same PR:**
-  - `examples/build_product.dip` — add `requires: [git]`
-  - `examples/build_product_with_superspec.dip` — add `requires: [git]`
-  - `examples/dotpowers.dip` — add `requires: [git]`
+  - `examples/build_product.dip` — add `requires: git`
+  - `examples/build_product_with_superspec.dip` — add `requires: git`
+  - `examples/dotpowers.dip` — add `requires: git`
   - Other built-ins audited: any that mention `git` in agent prompts or tool commands get the declaration
 - **Backward compatibility:** the change is additive. Workflows that don't declare `requires:` get the same behavior as today. CLI flag default is `auto`, which is a no-op when no workflow declares `requires:`. No existing test should need to change.
 - **CHANGELOG entry** (Added section):
 
-  > - **Workflow header `requires: [...]` for environmental dependencies.** Workflows can now declare prerequisites at the top of the `.dip` file. v0.29.0 implements `git` (`requires: [git]` makes tracker check git is installed and the workdir is a git repo before any LLM call). Unrecognized entries warn and continue, so workflow authors can forward-declare deps that future tracker versions will check. Closes #<filed-during-implementation>.
+  > - **Workflow header `requires: <list>` for environmental dependencies.** Workflows can now declare prerequisites at the top of the `.dip` file. v0.29.0 implements `git` (`requires: git` makes tracker check git is installed and the workdir is a git repo before any LLM call). Unrecognized entries warn and continue, so workflow authors can forward-declare deps that future tracker versions will check. Closes #<filed-during-implementation>.
   > - **`--git=off|warn|require|init` CLI flag** to override per-run. Default `auto` respects the workflow's `requires:` block. `--git=init` (with mandatory `--allow-init` latch) auto-runs `git init` in the workdir, with safety refusals for `$HOME` / `/` / nested repos.
   > - **`tracker doctor` git-requires check** shows what would happen at run start for the current dir + workflow + flags.
-  > - **Built-in workflows** that use git (`build_product`, `build_product_with_superspec`, `dotpowers`) now declare `requires: [git]`. Running them in a non-git directory fails in seconds with a copy-paste remediation, instead of burning hours of LLM spend before failing at the first `git commit` instruction.
+  > - **Built-in workflows** that use git (`build_product`, `build_product_with_superspec`, `dotpowers`) now declare `requires: git`. Running them in a non-git directory fails in seconds with a copy-paste remediation, instead of burning hours of LLM spend before failing at the first `git commit` instruction.
 
 - **README** — single new paragraph in the workflow-authoring section pointing at `requires:`.
 - **docs/architecture/** — no new doc needed; this is a small surface. A brief mention in `docs/architecture/adapter.md` describing the `requires:` IR field, if it gets one.
