@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Workflow header `requires: <list>` for environmental dependencies** ([#234](https://github.com/2389-research/tracker/issues/234)). Workflows can now declare prerequisites at the top of the `.dip` file via a comma-separated list (e.g. `requires: git`). v0.29.0 implements `git`: when a workflow declares `requires: git`, tracker verifies `git` is installed AND the working directory is a git repository before any node executes. Unrecognized entries (`docker`, `gh`, `jq`, etc.) warn and continue, so workflow authors can forward-declare dependencies that future tracker versions will check. The mechanism lives at the library + CLI boundary, not inside the engine — `pipeline.Preflight` is invoked once at run start; subgraph and `manager_loop` children inherit the parent's check. Requires dippin-lang v0.26.0 ([dippin-lang#35](https://github.com/2389-research/dippin-lang/issues/35), [#36](https://github.com/2389-research/dippin-lang/pull/36)).
+
+- **`--git=auto|off|warn|require|init` CLI flag** to override the policy per run. Default `auto` respects the workflow's `requires:` declaration. `--git=off` bypasses all git checks (escape hatch). `--git=warn` downgrades a hard failure to a warning and continues. `--git=require` forces the check even when the workflow doesn't declare it. `--git=init` (with mandatory `--allow-init` latch in non-interactive runs, or a `[Y/n]` prompt in interactive runs) auto-runs `git init` in the workdir, with **safety refusals** for `$HOME`, `/`, and any directory already inside a git repository — including linked worktrees (where `.git` is a file, not a directory) and bare repos (where there is no `.git` at all). Detection is via `git -C <dir> rev-parse --git-dir`, not a parent-directory walk for `.git`, so the three false-positive cases the spec flagged as Open Question 3 are all handled correctly.
+
+- **`tracker doctor` Git Requires check** previews what would happen at run start for the current dir + workflow + flags. Status maps to the policy: `OK` (workflow satisfied), `Error` (hard-fail under auto/require/init), `Warn` (downgrade under `--git=warn`), `Skip` (under `--git=off`). The check's `Hint` carries the exact remediation command (`git init`, `tracker run <wf> --git=init --allow-init`, install instructions).
+
+- **Library API: `tracker.Config.Git *GitConfig`** for embedded callers. Zero value resolves to `GitPreflightAuto`. The `GitPreflight` constants are re-exported on the `tracker` package as type aliases of `pipeline.GitPreflight` so consumers don't need to import the pipeline package. `tracker.WithGitConfig(policy, allowInit)` is the equivalent functional option for `tracker.Doctor`.
+
+- **`tracker workflows` now shows a REQUIRES column** per built-in workflow.
+
+- **Built-in workflows that commit / branch / merge mid-run declare `requires: git`** — `ask_and_execute`, `build_product`, and `build_product_with_superspec`. Running them in a non-git directory now fails in seconds with a copy-paste remediation message (`git init`, `--git=off`, `tracker run --git=init --allow-init`), instead of burning $20–$100 of LLM spend before failing at the first git operation.
+
+### Changed
+
+- **dippin-lang dependency bumped v0.25.0 → v0.26.0**. Picks up `ir.Workflow.Requires []string` and the parser / formatter support for the `requires:` workflow header keyword.
+
 ## [0.28.2] - 2026-05-14
 
 Patch release fixing a runaway-agent bug in three of the four built-in workflows. No engine changes.
