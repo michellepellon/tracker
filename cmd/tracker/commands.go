@@ -167,14 +167,18 @@ func executeWorkflows() error {
 
 	fmt.Println("\nBuilt-in workflows:")
 	fmt.Println()
-	fmt.Printf("  %-35s  %s\n", "NAME", "DESCRIPTION")
-	fmt.Printf("  %-35s  %s\n", "────", "───────────")
+	fmt.Printf("  %-35s  %-12s  %s\n", "NAME", "REQUIRES", "DESCRIPTION")
+	fmt.Printf("  %-35s  %-12s  %s\n", "────", "────────", "───────────")
 	for _, wf := range workflows {
 		goal := wf.Goal
-		if len(goal) > 80 {
-			goal = goal[:77] + "..."
+		if len(goal) > 70 {
+			goal = goal[:67] + "..."
 		}
-		fmt.Printf("  %-35s  %s\n", wf.Name+" ("+wf.DisplayName+")", goal)
+		req := strings.Join(wf.Requires, ", ")
+		if req == "" {
+			req = "—"
+		}
+		fmt.Printf("  %-35s  %-12s  %s\n", wf.Name+" ("+wf.DisplayName+")", req, goal)
 	}
 	fmt.Println()
 	fmt.Println("  Run directly:     tracker <workflow_name>")

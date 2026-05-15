@@ -90,3 +90,47 @@ func TestOpenWorkflow_Unknown(t *testing.T) {
 		t.Error("expected error for unknown workflow, got nil")
 	}
 }
+
+func TestParseWorkflowHeader_RequiresMulti(t *testing.T) {
+	displayName, goal, requires := parseWorkflowHeaderForTest([]byte(`workflow Foo
+  goal: "test"
+  requires: git, docker
+  start: Start
+  exit: Done
+`))
+	if displayName != "Foo" {
+		t.Errorf("displayName: want Foo, got %q", displayName)
+	}
+	if goal != "test" {
+		t.Errorf("goal: want 'test', got %q", goal)
+	}
+	if len(requires) != 2 || requires[0] != "git" || requires[1] != "docker" {
+		t.Errorf("requires: want [git docker], got %v", requires)
+	}
+}
+
+func TestParseWorkflowHeader_NoRequires(t *testing.T) {
+	_, _, requires := parseWorkflowHeaderForTest([]byte(`workflow Foo
+  goal: "test"
+  start: Start
+  exit: Done
+`))
+	if len(requires) != 0 {
+		t.Errorf("expected empty requires when not declared, got %v", requires)
+	}
+}
+
+func TestParseWorkflowHeader_RequiresStopsAtStart(t *testing.T) {
+	// Header scan stops at `start:`; a `requires:` line after `start:` is
+	// ignored. (No real workflow would do that, but the parser shouldn't
+	// scan the whole file looking for it.)
+	_, _, requires := parseWorkflowHeaderForTest([]byte(`workflow Foo
+  goal: "test"
+  start: Start
+  requires: git
+  exit: Done
+`))
+	if len(requires) != 0 {
+		t.Errorf("expected empty requires (declared after start:), got %v", requires)
+	}
+}
