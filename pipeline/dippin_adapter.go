@@ -96,6 +96,7 @@ func buildGraphFromWorkflow(workflow *ir.Workflow) *Graph {
 	}
 	extractWorkflowDefaults(workflow.Defaults, g.Attrs)
 	extractWorkflowVars(workflow.Vars, g.Attrs)
+	extractRequires(workflow.Requires, g.Attrs)
 	if len(workflow.Stylesheet) > 0 {
 		g.Attrs["model_stylesheet"] = serializeStylesheet(workflow.Stylesheet)
 	}
@@ -712,6 +713,31 @@ func extractWorkflowVars(vars map[string]string, attrs map[string]string) {
 	for key, value := range vars {
 		attrs[GraphParamAttrKey(key)] = value
 	}
+}
+
+// extractRequires writes the workflow's environmental-dependency list to
+// graph.Attrs["requires"] as a comma-separated string. Empty / nil input
+// is a no-op. The v0.29.0 git preflight reads this via Graph.RequiredDeps().
+//
+// The dippin-lang IR exposes this list as []string on Workflow.Requires
+// (v0.26.0+). The flat-string round-trip through Attrs matches the rest of
+// the adapter's IR-to-Graph projection — handlers (and Graph methods like
+// RequiredDeps) read scalar strings from Attrs, not slices.
+func extractRequires(requires []string, attrs map[string]string) {
+	if len(requires) == 0 {
+		return
+	}
+	cleaned := make([]string, 0, len(requires))
+	for _, r := range requires {
+		s := strings.TrimSpace(r)
+		if s != "" {
+			cleaned = append(cleaned, s)
+		}
+	}
+	if len(cleaned) == 0 {
+		return
+	}
+	attrs["requires"] = strings.Join(cleaned, ", ")
 }
 
 // setIfNonEmpty sets attrs[key] = value only when value is non-empty.
