@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +43,13 @@ var (
 	ErrGitNotInstalled = errors.New("git not installed")
 	// ErrGitWorkdirNotRepo — workdir is not inside a git repository and the workflow requires it.
 	ErrGitWorkdirNotRepo = errors.New("workdir is not a git repository")
+	// ErrGitUnbornHEAD — workdir is inside a git work tree but HEAD is unborn
+	// (no commits yet). Distinct from ErrGitWorkdirNotRepo: `git rev-parse
+	// --is-inside-work-tree` returns true here, but `git worktree add ...
+	// HEAD`, `git log`, `git merge` all fail until at least one commit
+	// exists. Surfaced at preflight so requires:git workflows fail fast
+	// instead of mid-run after burning LLM turns.
+	ErrGitUnbornHEAD = errors.New("workdir is a git repository with no commits (unborn HEAD)")
 	// ErrGitAutoInitRefused — --git=init requested but a safety latch fired (home, root, nested).
 	ErrGitAutoInitRefused = errors.New("auto-init refused by safety latch")
 )
@@ -155,6 +163,26 @@ func Preflight(ctx context.Context, cfg PreflightConfig) error {
 		}
 		return fmt.Errorf("%w: %s", ErrGitWorkdirNotRepo, msg)
 	}
+	// At this point isRepo == true: workdir is inside a real work tree.
+	// Verify HEAD is born — requires:git workflows that run `git worktree
+	// add ... HEAD`, `git merge`, etc. all fail in an unborn repo, and
+	// `--is-inside-work-tree` returns true regardless of HEAD state. Catch
+	// it here rather than letting the workflow crash mid-run.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("preflight cancelled: %w", err)
+	}
+	born, headErr := hasBornHEAD(ctx, cfg.WorkDir)
+	if headErr != nil {
+		return fmt.Errorf("git check (HEAD): %w", headErr)
+	}
+	if !born {
+		msg := buildUnbornHEADMessage(cfg.WorkDir)
+		if cfg.Policy == GitPreflightWarn {
+			warn("%s", msg)
+			return nil
+		}
+		return fmt.Errorf("%w: %s", ErrGitUnbornHEAD, msg)
+	}
 	return nil
 }
 
@@ -196,17 +224,59 @@ func buildInsideBareRepoMessage(workDir string) string {
 	}, "\n")
 }
 
+// buildWorkdirNotRepoMessage emits the remediation for the
+// `requires: git` + workdir-not-a-repo case. Offers two paths
+// explicitly because round-8 review (Copilot:3261104567) flagged that
+// the round-7 copy ("git init + --allow-empty") recreated the same
+// "files outside HEAD" trap Latch 3 in runAutoInit exists to prevent —
+// for a workdir that already contains source files, the user almost
+// always wants `git add .` first so subsequent `git worktree add ...
+// HEAD` sees those files. Mirrors the buildUnbornHEADMessage shape.
 func buildWorkdirNotRepoMessage(workDir string) string {
 	return strings.Join([]string{
 		"this workflow requires a git repository, but the current directory is not inside one.",
 		"",
 		"  Working directory: " + workDir,
 		"",
-		"  Initialize a repo here:",
+		"  Initialize a repo here. To capture the existing workdir contents",
+		"  (recommended if files are already present — workflows that run",
+		"  `git worktree add ... HEAD` need them in HEAD):",
 		"    git init",
+		"    git add .",
+		"    git commit -m \"initial\"",
 		"",
-		"  Or have tracker do it:",
+		"  Or, to start with an empty baseline (workflow files commit later):",
+		"    git init",
+		"    git commit --allow-empty -m \"initial\"",
+		"",
+		"  Or, in an empty directory, have tracker do it:",
 		"    tracker <workflow> --git=init --allow-init",
+		"",
+		"  Or pass --git=off to bypass this check if you're sure git isn't needed.",
+	}, "\n")
+}
+
+// buildUnbornHEADMessage is the remediation copy for the
+// `requires: git` + isRepo=true + no commits case. Mirrors the
+// buildWorkdirNotRepoMessage shape so users get the same instructions
+// whether they're starting from scratch or recovering from a bare
+// `git init`. The `--allow-empty` initial commit is the canonical fix —
+// any content the user wants in HEAD they should stage first.
+func buildUnbornHEADMessage(workDir string) string {
+	return strings.Join([]string{
+		"this workflow requires a git repository with at least one commit, but the current repo has no commits (unborn HEAD).",
+		"",
+		"  Working directory: " + workDir,
+		"",
+		"  Workflows that use `git worktree add ... HEAD`, `git log`, `git merge`,",
+		"  or `git diff` against HEAD can't run until HEAD points at a real commit.",
+		"",
+		"  Create an initial commit. To capture the existing workdir contents:",
+		"    git add .",
+		"    git commit -m \"initial\"",
+		"",
+		"  Or, to start with an empty baseline (workflow files commit later):",
+		"    git commit --allow-empty -m \"initial\"",
 		"",
 		"  Or pass --git=off to bypass this check if you're sure git isn't needed.",
 	}, "\n")
@@ -279,6 +349,23 @@ func SafetyLatches(ctx context.Context, workDir string) error {
 	return safetyLatches(ctx, workDir)
 }
 
+// HasBornHEAD reports whether HEAD in workDir points at a real commit.
+// Thin public alias of hasBornHEAD; exported so the doctor's git-requires
+// preview can model the same born-HEAD check the runtime preflight does.
+// Returns (false, nil) for an unborn repo — error is reserved for
+// unexpected I/O.
+func HasBornHEAD(ctx context.Context, workDir string) (bool, error) {
+	return hasBornHEAD(ctx, workDir)
+}
+
+// WorkdirHasContent reports whether workDir contains any entry other
+// than `.git`. Thin public alias of workdirHasContent; exported so the
+// doctor's --git=init --allow-init preview can model the auto-init
+// workdir-content latch without duplicating the rule.
+func WorkdirHasContent(workDir string) (bool, error) {
+	return workdirHasContent(workDir)
+}
+
 // runAutoInit performs `git init` after running safety latches, then
 // ensures the freshly-initialized repo has a born HEAD by creating an
 // empty initial commit. The initial commit matters because worktree
@@ -293,6 +380,9 @@ func SafetyLatches(ctx context.Context, workDir string) error {
 // Required latches:
 //   - allowInit == true OR interactive prompt answered "yes"
 //   - safetyLatches(workDir) passes
+//   - workdir is empty (no files outside any pre-existing `.git`) —
+//     see workdirHasContent for the rationale (we refuse rather than
+//     auto-`git add -A` user files that might be secrets / artifacts)
 //
 // Returns a wrapped ErrGitAutoInitRefused if any latch fires.
 func runAutoInit(ctx context.Context, workDir string, allowInit bool, interactive bool, promptYN func(prompt string) bool) error {
@@ -312,6 +402,28 @@ func runAutoInit(ctx context.Context, workDir string, allowInit bool, interactiv
 	// Latch 2: location safety.
 	if err := safetyLatches(ctx, workDir); err != nil {
 		return err
+	}
+	// Latch 3: workdir baseline content. Auto-init creates an empty initial
+	// commit so HEAD is born, but it does NOT stage user files. In a
+	// non-empty workdir that leaves the user's content outside HEAD —
+	// workflows that `git worktree add ... HEAD` get an empty worktree
+	// instead of one containing SPEC.md / sources / etc., and only
+	// discover the breakage mid-run after the workflow has already spent
+	// LLM turns. Auto-`git add -A`-ing instead would silently capture
+	// `.env`, build artifacts, and anything the user hadn't yet decided
+	// to track. The safer call is to refuse here and tell the user to
+	// stage their own initial commit. Empty workdir → fall through to
+	// the empty-commit path below.
+	hasContent, contentErr := workdirHasContent(workDir)
+	if contentErr != nil {
+		return fmt.Errorf("%w: scan workdir: %v", ErrGitAutoInitRefused, contentErr)
+	}
+	if hasContent {
+		// Use %q for workDir so paths containing spaces / special chars
+		// produce copy/pasteable commands (Copilot:3260796955,
+		// CodeRabbit:3260803559). %s here would emit unquoted shell-broken
+		// commands for any non-trivial workdir path on macOS/Windows.
+		return fmt.Errorf("%w: workdir is not empty.\n\n  --git=init creates an empty initial commit; tracker will not auto-`git add` your existing files (they might be secrets, build artifacts, or content you haven't decided to track). Stage and commit them yourself so you control the baseline:\n\n    git -C %q init\n    git -C %q add .\n    git -C %q commit -m \"initial\"\n\n  Or empty the workdir first, then re-run with --git=init --allow-init.", ErrGitAutoInitRefused, workDir, workDir, workDir)
 	}
 	initCmd := exec.CommandContext(ctx, "git", "-C", workDir, "init", "-q")
 	initCmd.Env = gitProbeEnv()
@@ -338,12 +450,26 @@ func runAutoInit(ctx context.Context, workDir string, allowInit bool, interactiv
 }
 
 // defaultPromptYN reads a line from stdin and returns true unless the user
-// types something starting with "n" or "N". Empty input defaults to yes.
+// types something starting with "n" or "N". Empty input (i.e. an actual
+// empty line after a successful read) defaults to yes — matching the
+// uppercase Y in the "[Y/n]" prompt.
+//
+// EOF / read error returns false: this prompt is the safety latch when
+// --allow-init was not passed, and a closed/erroring stdin is NOT an
+// affirmative answer. Treating Scan() == false as "yes" would let a
+// piped script with no stdin satisfy the consent gate without the user
+// ever typing anything, defeating the latch.
 func defaultPromptYN(prompt string) bool {
 	fmt.Fprint(os.Stderr, prompt)
-	scanner := bufio.NewScanner(os.Stdin)
+	return readPromptYN(os.Stdin)
+}
+
+// readPromptYN is the testable inner half of defaultPromptYN — same
+// contract, but the input source is injected.
+func readPromptYN(r io.Reader) bool {
+	scanner := bufio.NewScanner(r)
 	if !scanner.Scan() {
-		return true // EOF → default yes
+		return false // EOF / read error → NOT consent (see defaultPromptYN comment)
 	}
 	answer := strings.TrimSpace(scanner.Text())
 	if answer == "" {
@@ -455,6 +581,123 @@ func safetyLatches(ctx context.Context, workDir string) error {
 		return fmt.Errorf("%w: workdir is inside a parent git repository", ErrGitAutoInitRefused)
 	}
 	return nil
+}
+
+// workdirHasContent reports whether workDir has any directory entry
+// other than ".git". A freshly-created `.git` directory is the one
+// thing auto-init is allowed to add; anything else means the user has
+// existing content and the empty-initial-commit auto-init path would
+// leave that content outside HEAD. See the Latch 3 comment in
+// runAutoInit for the full rationale.
+//
+// We treat any non-`.git` entry — including dotfiles like `.gitignore`
+// or `.env` — as content. A user with a `.gitignore` they want in HEAD
+// has the same answer as a user with source files: make the initial
+// commit yourself so you decide what's tracked.
+//
+// The `.git` exemption requires the entry to be a real directory
+// (CodeRabbit:3260803525). A stray FILE or SYMLINK named `.git` is
+// user-managed content, not repo metadata — exempting it here would let
+// runAutoInit fall through to `git init` against a workdir that already
+// has user-visible files, exactly the trap Latch 3 exists to prevent.
+func workdirHasContent(workDir string) (bool, error) {
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.Name() == ".git" && e.IsDir() {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// isUnbornHEADStderr reports whether stderr from `git rev-parse --verify
+// HEAD^{commit}` corresponds to the benign unborn-HEAD case rather than a
+// real failure (corrupt refs, permission error, etc.). The two phrases
+// it matches are both from upstream git and have been stable across
+// recent versions:
+//
+//   - "Needed a single revision" — emitted by older git (and by plain
+//     `--verify HEAD` in newer git) when HEAD is unborn
+//   - "unknown revision or path not in the working tree" — emitted by
+//     newer git's `^{commit}` peeling code path when HEAD doesn't
+//     resolve to a commit (covers both unborn HEAD AND dangling /
+//     non-commit OIDs at HEAD)
+//
+// Distinguishing the two from other ExitError outputs keeps hasBornHEAD
+// from collapsing every git failure into "unborn" — corruption-class
+// failures need to surface as errors so callers can fix the underlying
+// problem (or rerun under `--git=warn`) rather than getting the
+// "create an initial commit" remediation steer.
+//
+// Callers force LANG/LC_ALL=C via gitProbeEnv so a localized git
+// installation can't translate either phrase and bypass this check.
+func isUnbornHEADStderr(stderr []byte) bool {
+	s := string(stderr)
+	return strings.Contains(s, "Needed a single revision") ||
+		strings.Contains(s, "unknown revision or path not in the working tree")
+}
+
+// hasBornHEAD reports whether HEAD points at a real commit in workDir.
+// Returns (false, nil) for an unborn HEAD (newly-init'd repo with no
+// commits) — that case is expected and not an error. Returns an error
+// for unexpected failures (corrupt refs, permission denied, etc.) so
+// callers don't silently report "unborn, please git commit --allow-empty"
+// when the actual problem is something `git fsck` would diagnose.
+//
+// Caller is responsible for having already established that workDir is
+// inside a work tree (via checkGit); this probe is the second-stage
+// check that catches the gap between `--is-inside-work-tree` (which
+// says yes for unborn repos) and what requires:git workflows actually
+// need (HEAD must point at a commit).
+//
+// Probe choice: `git rev-parse --verify HEAD^{commit}` rather than
+// plain `--verify HEAD` (Codex:3260803910). `^{commit}` forces commit
+// peeling, so a HEAD pointing at a dangling OID or a non-commit object
+// (tree/blob in a pathological repo) fails the probe instead of
+// masquerading as born. Plain `--verify HEAD` would say yes for any
+// resolvable OID, including non-commit objects that `git worktree add
+// HEAD` / `git log` would still fail on.
+//
+// Stderr inspection: pre-fix this function used `cmd.Run()` and treated
+// every `*exec.ExitError` as `(false, nil)`. Go's `os/exec` package
+// does NOT populate `ExitError.Stderr` for `Run()` — only `Output()` /
+// `CombinedOutput()` capture stderr (Copilot:3260797018,
+// CodeRabbit:3260803531). So the previous code couldn't distinguish
+// unborn HEAD from corrupt refs even though the doc comment claimed it
+// could. Switched to `CombinedOutput()` + `isUnbornHEADStderr` so
+// unborn classifies as `(false, nil)` and anything else surfaces as an
+// error.
+func hasBornHEAD(ctx context.Context, workDir string) (bool, error) {
+	if _, lerr := exec.LookPath("git"); lerr != nil {
+		if errors.Is(lerr, exec.ErrNotFound) {
+			// Caller's checkGit step would already have surfaced this as
+			// ErrGitNotInstalled. If we got here git was found earlier but
+			// disappeared from PATH between probes — surface it.
+			return false, fmt.Errorf("locate git in PATH: %w", lerr)
+		}
+		return false, fmt.Errorf("locate git in PATH: %w", lerr)
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "--verify", "HEAD^{commit}")
+	cmd.Env = gitProbeEnv()
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if isUnbornHEADStderr(out) {
+			return false, nil // expected — unborn HEAD or non-commit at HEAD
+		}
+		return false, fmt.Errorf("git rev-parse --verify HEAD^{commit} refused: %s", strings.TrimSpace(string(out)))
+	}
+	return false, fmt.Errorf("git rev-parse --verify HEAD^{commit}: %w", err)
 }
 
 // checkGit runs two cheap probes:

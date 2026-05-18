@@ -13,6 +13,35 @@ import (
 	"testing"
 )
 
+// TestReadPromptYN pins the consent semantics of the interactive --git=init
+// latch: EOF / read error refuses, an empty line accepts (matches the
+// uppercase Y in "[Y/n]"), and "n"/"N" refuses. Pre-fix EOF returned true,
+// which let a stdin-less pipe satisfy the consent gate without the user
+// typing anything (Copilot:3260568794).
+func TestReadPromptYN(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "eof_refuses", input: "", want: false},
+		{name: "blank_line_accepts", input: "\n", want: true},
+		{name: "yes_lower", input: "y\n", want: true},
+		{name: "yes_upper", input: "Y\n", want: true},
+		{name: "no_lower", input: "n\n", want: false},
+		{name: "no_upper", input: "N\n", want: false},
+		{name: "no_word", input: "no\n", want: false},
+		{name: "garbage_accepts", input: "asdf\n", want: true}, // anything not starting with n/N
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := readPromptYN(strings.NewReader(tc.input)); got != tc.want {
+				t.Fatalf("readPromptYN(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 // mustGit runs a git command in dir with deterministic author identity,
 // failing the test if it returns a non-zero exit code. Skips if git is
 // not on PATH (delegates to requireGit from git_artifacts_test.go).
@@ -573,6 +602,7 @@ func TestPreflight_HappyPath_NoRequires_NoCheck(t *testing.T) {
 func TestPreflight_HappyPath_RequiresGit_InRepo(t *testing.T) {
 	dir := t.TempDir()
 	mustGitInit(t, dir)
+	mustGit(t, dir, "commit", "--allow-empty", "-m", "init") // born HEAD; pre-fix this passed without a commit (Copilot:3260568737)
 	err := Preflight(context.Background(), PreflightConfig{
 		WorkDir:  dir,
 		Requires: []string{"git"},
@@ -580,6 +610,316 @@ func TestPreflight_HappyPath_RequiresGit_InRepo(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+// TestPreflight_UnbornHEAD_HardFails pins the born-HEAD invariant added for
+// PR #235 round-7 review feedback (Copilot:3260568737). Pre-fix, a freshly
+// `git init`'d repo with no commits satisfied `--is-inside-work-tree`, so
+// requires:git workflows passed preflight and then crashed mid-run on
+// `git worktree add ... HEAD` after burning LLM turns. Now Preflight
+// surfaces ErrGitUnbornHEAD up front.
+func TestPreflight_UnbornHEAD_HardFails(t *testing.T) {
+	dir := t.TempDir()
+	mustGitInit(t, dir) // no commit → HEAD is unborn
+	err := Preflight(context.Background(), PreflightConfig{
+		WorkDir:  dir,
+		Requires: []string{"git"},
+		Policy:   GitPreflightAuto,
+	})
+	if !errors.Is(err, ErrGitUnbornHEAD) {
+		t.Fatalf("want ErrGitUnbornHEAD, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "git commit --allow-empty") {
+		t.Fatalf("error must include the --allow-empty remediation, got: %v", err)
+	}
+}
+
+// TestPreflight_UnbornHEAD_WarnPolicy mirrors the hard-fail test under
+// --git=warn: the issue is reported via Warner and Preflight returns nil
+// so the workflow can still attempt to run (matching the existing
+// not-a-repo / not-installed warn semantics).
+func TestPreflight_UnbornHEAD_WarnPolicy(t *testing.T) {
+	dir := t.TempDir()
+	mustGitInit(t, dir)
+	var warnings []string
+	err := Preflight(context.Background(), PreflightConfig{
+		WorkDir:  dir,
+		Requires: []string{"git"},
+		Policy:   GitPreflightWarn,
+		Warner: func(format string, args ...any) {
+			warnings = append(warnings, fmt.Sprintf(format, args...))
+		},
+	})
+	if err != nil {
+		t.Fatalf("want nil err under warn policy, got %v", err)
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "unborn HEAD") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected unborn-HEAD warning, got %v", warnings)
+	}
+}
+
+// TestHasBornHEAD pins the probe's contract:
+//
+//   - born HEAD (resolves to a commit) → (true, nil)
+//   - unborn HEAD (no commits yet) → (false, nil), classified via
+//     isUnbornHEADStderr matching "Needed a single revision" or
+//     "unknown revision or path not in the working tree"
+//   - non-repo dir → wrapped error. Pre-fix this comment claimed
+//     (false, nil) and was wrong (Copilot:3261104638) — after the
+//     round-8 stderr classifier, anything that doesn't match the
+//     unborn phrases surfaces. The non-repo case is the caller's
+//     responsibility to gate (Preflight calls checkGit first, which
+//     surfaces ErrGitWorkdirNotRepo before hasBornHEAD ever runs).
+//     The non-repo subtest below pins the error path so the contract
+//     is enforced, not just documented.
+func TestHasBornHEAD(t *testing.T) {
+	requireGit(t)
+	t.Run("born", func(t *testing.T) {
+		dir := t.TempDir()
+		mustGitInit(t, dir)
+		mustGit(t, dir, "commit", "--allow-empty", "-m", "init")
+		born, err := hasBornHEAD(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !born {
+			t.Fatalf("want born=true for repo with commit")
+		}
+	})
+	t.Run("unborn", func(t *testing.T) {
+		dir := t.TempDir()
+		mustGitInit(t, dir)
+		born, err := hasBornHEAD(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if born {
+			t.Fatalf("want born=false for fresh init")
+		}
+	})
+	// Non-repo dir surfaces as an error. Callers in Preflight gate this
+	// on checkGit (which returns ErrGitWorkdirNotRepo first), so this
+	// path isn't reached in production — but the probe shouldn't lie
+	// about it. Pre-round-8 the cmd.Run() ExitError was silently
+	// returned as (false, nil); after switching to CombinedOutput +
+	// isUnbornHEADStderr, "fatal: not a git repository" doesn't match
+	// the unborn phrases and surfaces as a wrapped error.
+	t.Run("non_repo_returns_error", func(t *testing.T) {
+		dir := t.TempDir() // no `git init` — plain non-repo
+		born, err := hasBornHEAD(context.Background(), dir)
+		if err == nil {
+			t.Fatalf("want non-nil error for non-repo dir, got born=%v err=nil", born)
+		}
+		if born {
+			t.Fatalf("want born=false when err is non-nil, got true")
+		}
+	})
+}
+
+// TestRunAutoInit_RefusedByLatch_NonEmptyWorkdir pins the workdir-content
+// latch added for PR #235 round-7 review feedback (Copilot:3260568814).
+// Auto-init creates an empty initial commit; in a non-empty workdir that
+// would leave the user's files outside HEAD (worktrees from HEAD would
+// then be empty, breaking workflows that read SPEC.md etc. from a
+// worktree). We refuse rather than `git add -A`-ing the user's content,
+// which might include secrets or build artifacts.
+func TestRunAutoInit_RefusedByLatch_NonEmptyWorkdir(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	// A single user file is enough to trigger the latch.
+	if err := os.WriteFile(filepath.Join(dir, "SPEC.md"), []byte("# spec\n"), 0o644); err != nil {
+		t.Fatalf("seed workdir: %v", err)
+	}
+	err := runAutoInit(context.Background(), dir, true /*allowInit*/, false /*interactive*/, nil)
+	if !errors.Is(err, ErrGitAutoInitRefused) {
+		t.Fatalf("want ErrGitAutoInitRefused, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "workdir is not empty") {
+		t.Fatalf("error must mention workdir-not-empty, got: %v", err)
+	}
+	// And the refusal must come BEFORE git init runs — otherwise we've
+	// already mutated the user's workdir before reporting refusal.
+	if _, statErr := os.Stat(filepath.Join(dir, ".git")); !os.IsNotExist(statErr) {
+		t.Fatalf("workdir-content latch must refuse before `git init`; .git exists: %v", statErr)
+	}
+}
+
+// TestWorkdirHasContent pins the helper's contract: empty dir → false, any
+// non-`.git` entry (including dotfiles) → true, pre-existing `.git` alone
+// → false (so a partial / replay auto-init still works on an empty repo).
+func TestWorkdirHasContent(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		dir := t.TempDir()
+		has, err := workdirHasContent(dir)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if has {
+			t.Fatalf("want has=false for empty dir")
+		}
+	})
+	t.Run("only_dot_git", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		has, err := workdirHasContent(dir)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if has {
+			t.Fatalf("want has=false when only .git is present")
+		}
+	})
+	t.Run("regular_file", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		has, err := workdirHasContent(dir)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !has {
+			t.Fatalf("want has=true for dir with regular file")
+		}
+	})
+	t.Run("dotfile_counts", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		has, err := workdirHasContent(dir)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !has {
+			t.Fatalf("want has=true for dir with .gitignore (user-managed, must be in initial commit)")
+		}
+	})
+	// CodeRabbit:3260803525 — a FILE named `.git` is the worktree-link
+	// shape and is user-managed content, not repo metadata we created.
+	// Pre-fix the helper exempted any entry named `.git` regardless of
+	// type, which would let runAutoInit fall through to `git init`
+	// against a workdir that already had user-visible files.
+	t.Run("dot_git_FILE_counts_as_content", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /elsewhere\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		has, err := workdirHasContent(dir)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !has {
+			t.Fatalf("want has=true for dir whose `.git` is a FILE (worktree-link or stray) — Latch 3 must refuse here")
+		}
+	})
+	// Same concern for symlinks: an attacker / accident planting a
+	// symlink named `.git` should NOT exempt the workdir. os.ReadDir's
+	// DirEntry.IsDir reports the entry's own type (lstat-style), so a
+	// symlink — even to a real directory — reports IsDir()==false and
+	// the helper correctly counts it as content.
+	t.Run("dot_git_SYMLINK_counts_as_content", func(t *testing.T) {
+		dir := t.TempDir()
+		target := t.TempDir() // any real directory
+		if err := os.Symlink(target, filepath.Join(dir, ".git")); err != nil {
+			t.Skipf("symlink unsupported on this platform: %v", err)
+		}
+		has, err := workdirHasContent(dir)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !has {
+			t.Fatalf("want has=true for dir whose `.git` is a SYMLINK — Latch 3 must refuse here")
+		}
+	})
+}
+
+// TestIsUnbornHEADStderr pins the two phrases hasBornHEAD relies on to
+// distinguish unborn HEAD from real failures (Copilot:3260797018,
+// CodeRabbit:3260803531). Both are upstream-stable English from git's
+// rev-parse code path; the C locale is forced via gitProbeEnv so
+// localized git installs can't bypass the classifier.
+func TestIsUnbornHEADStderr(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{"needed_single_revision", "fatal: Needed a single revision\n", true},
+		{"unknown_revision", "fatal: ambiguous argument 'HEAD^{commit}': unknown revision or path not in the working tree.\n", true},
+		{"corrupt_refs", "fatal: bad object HEAD\n", false},
+		{"permission_denied", "fatal: unable to read ref: refs/heads/main\n", false},
+		{"empty", "", false},
+		{"dubious_ownership", "fatal: detected dubious ownership in repository at '/tmp/x'\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isUnbornHEADStderr([]byte(tc.stderr)); got != tc.want {
+				t.Fatalf("isUnbornHEADStderr(%q) = %v, want %v", tc.stderr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHasBornHEAD_RejectsNonCommitHEAD pins that hasBornHEAD uses
+// `HEAD^{commit}` (Codex:3260803910) rather than plain `HEAD`, so a
+// HEAD pointing at a non-commit object (tree/blob) is correctly
+// reported as NOT born. End-state under test: HEAD resolves under
+// plain `--verify` (because a tree is a valid object name) but FAILS
+// under `^{commit}` peeling — exactly the gap the reviewer flagged.
+//
+// Setup detail: git's own `update-ref` refuses to point a branch ref
+// at a non-commit OID (safety check), so we bypass it by writing the
+// raw OID directly to `.git/HEAD`. That produces a detached HEAD
+// pointing at the tree object, replicating the corrupt / pathological
+// state without fighting git's safety net.
+func TestHasBornHEAD_RejectsNonCommitHEAD(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	mustGitInit(t, dir)
+	mustGit(t, dir, "commit", "--allow-empty", "-m", "init")
+	// Extract the tree OID of the empty commit so we have a known
+	// non-commit object that exists in the object store.
+	treeCmd := exec.Command("git", "-C", dir, "rev-parse", "HEAD^{tree}")
+	treeCmd.Env = gitProbeEnv()
+	treeOut, err := treeCmd.Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD^{tree}: %v", err)
+	}
+	treeOID := strings.TrimSpace(string(treeOut))
+	if treeOID == "" {
+		t.Fatalf("empty tree OID")
+	}
+	// Bypass git: write the tree OID directly into .git/HEAD so HEAD
+	// becomes a detached ref to a non-commit object.
+	if err := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte(treeOID+"\n"), 0o644); err != nil {
+		t.Fatalf("write .git/HEAD: %v", err)
+	}
+	// Pre-condition sanity: plain `--verify HEAD` (without ^{commit})
+	// would still succeed here because the OID resolves to a real
+	// object — this is the gap that motivated the ^{commit} switch.
+	plainCmd := exec.Command("git", "-C", dir, "rev-parse", "--verify", "HEAD")
+	plainCmd.Env = gitProbeEnv()
+	if err := plainCmd.Run(); err != nil {
+		t.Skipf("git rev-parse --verify HEAD already failed before our probe (git version differs?): %v", err)
+	}
+	// Now hasBornHEAD must report (false, nil): tree resolves but
+	// `^{commit}` peeling fails.
+	born, err := hasBornHEAD(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if born {
+		t.Fatalf("want born=false when HEAD points at a non-commit object; pre-fix this returned born=true under plain `--verify HEAD`")
 	}
 }
 
