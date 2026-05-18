@@ -74,6 +74,13 @@ func parseFlagsForMode(mode commandMode, args []string, cfg *runConfig) (runConf
 
 // parseDoctorFlags handles doctor-specific flag parsing.
 // Supports: --probe (live auth check), -w/--workdir, --backend, and an optional positional pipeline file.
+//
+// Uses parseArgsMultiPass so flags work in any order relative to the
+// positional pipeline argument, matching run-mode's UX. Pre-fix
+// `tracker doctor wf.dip --git=warn` silently left cfg.git at the
+// default because flag.Parse stops at the first positional, and the
+// downstream `--git=warn` override never reached the Git Requires
+// check.
 func parseDoctorFlags(args []string, cfg *runConfig) (runConfig, error) {
 	dfs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	dfs.SetOutput(io.Discard)
@@ -83,11 +90,15 @@ func parseDoctorFlags(args []string, cfg *runConfig) (runConfig, error) {
 	dfs.StringVar(&cfg.backend, "backend", "", "Agent backend: native (default), claude-code, or acp")
 	dfs.StringVar(&cfg.git, "git", "", "Git preflight policy (auto/off/warn/require/init) to evaluate")
 	dfs.BoolVar(&cfg.allowInit, "allow-init", false, "Required latch for --git=init")
-	if err := dfs.Parse(args[2:]); err != nil {
+	positional, err := parseArgsMultiPass(dfs, args[2:])
+	if err != nil {
 		return *cfg, fmt.Errorf("doctor: %w", err)
 	}
-	if dfs.NArg() > 0 {
-		cfg.pipelineFile = dfs.Arg(0)
+	if len(positional) > 1 {
+		return *cfg, fmt.Errorf("doctor: unexpected extra arguments after pipeline file: %v", positional[1:])
+	}
+	if len(positional) == 1 {
+		cfg.pipelineFile = positional[0]
 	}
 	if err := validateBackend(cfg.backend); err != nil {
 		return *cfg, fmt.Errorf("doctor: %w", err)

@@ -1054,11 +1054,13 @@ func probeGitForDoctor(ctx context.Context, workDir string) (installed bool, isR
 		return false, false, false, fmt.Errorf("locate git in PATH: %w", lerr)
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "--is-inside-work-tree")
-	// Strip sensitive env (API keys, tokens, secrets, passwords) before
-	// invoking git — matches pipeline.checkGit's posture. Without this,
-	// Doctor would pass provider credentials into the git process
-	// unnecessarily (TRACKER_PASS_ENV=1 is the documented escape hatch).
-	cmd.Env = pipeline.GitSafeEnv()
+	// Strip sensitive env AND force LANG/LC_ALL=C so the "not a git
+	// repository" classifier below can rely on stable English stderr
+	// regardless of operator locale. Pre-fix the doctor on a localized
+	// install would have reported a plain non-repo as `git rev-parse
+	// refused: <translated phrase>` instead of the documented
+	// not-a-repo remediation.
+	cmd.Env = pipeline.GitProbeEnv()
 	out, runErr := cmd.Output()
 	if runErr == nil {
 		stdout := strings.TrimSpace(string(out))

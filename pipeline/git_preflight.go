@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -224,6 +225,31 @@ func resolveSymlinksOrFallback(p string) string {
 	return p
 }
 
+// samePathForLatch reports whether two resolved paths refer to the same
+// directory for safetyLatches' purposes. On case-insensitive filesystems
+// (Windows by default, macOS APFS/HFS+ when not formatted
+// case-sensitive) `C:\Users\Bob` and `c:\users\bob` denote the same
+// directory but byte-equal comparison would miss. We approximate with
+// runtime.GOOS rather than probing the FS so the check is deterministic
+// and doesn't need an existing path. The Linux/strict-unix path stays
+// case-sensitive — common Linux ext4/xfs setups are case-sensitive and
+// allowing a fold here would be a real fail-open.
+func samePathForLatch(a, b string) bool {
+	if a == b {
+		return true
+	}
+	// Darwin's default APFS is case-insensitive at the filesystem layer,
+	// but Go's runtime doesn't expose that signal cheaply and case-
+	// sensitive APFS volumes exist. The conservative call is to fold on
+	// Windows only — macOS users who manage to spell $HOME differently
+	// than os.UserHomeDir() returns it would still hit byte equality in
+	// the common case via filepath.Clean + EvalSymlinks normalization.
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return false
+}
+
 // isNotARepoStderr reports whether stderr captured from a non-zero
 // `git rev-parse` exit corresponds to the benign "not a git repository"
 // case rather than a real failure (dubious ownership, safe.directory,
@@ -232,7 +258,11 @@ func resolveSymlinksOrFallback(p string) string {
 // that git refused to inspect.
 //
 // The phrase comes straight from setup.c's `not_a_git_repository_msg`
-// in upstream git; it has been stable since at least git 1.5.0.
+// in upstream git; it has been stable since at least git 1.5.0. The
+// callers force LANG/LC_ALL=C via gitProbeEnv so a localized git
+// installation can't translate the diagnostic and bypass this check —
+// pre-fix this would have classified a plain non-repo as an unexpected
+// probe failure on French/Japanese/etc. systems.
 func isNotARepoStderr(stderr []byte) bool {
 	return strings.Contains(string(stderr), "not a git repository")
 }
@@ -249,7 +279,16 @@ func SafetyLatches(ctx context.Context, workDir string) error {
 	return safetyLatches(ctx, workDir)
 }
 
-// runAutoInit performs `git init` after running safety latches.
+// runAutoInit performs `git init` after running safety latches, then
+// ensures the freshly-initialized repo has a born HEAD by creating an
+// empty initial commit. The initial commit matters because worktree
+// workflows (ask_and_execute, build_product_with_superspec) run
+// `git worktree add ... HEAD` early — that fails in a freshly-init'd
+// repo with no commits. Without this step the advertised
+// `--git=init --allow-init` remediation would pass preflight and the
+// pipeline would then crash deep in setup after burning user / LLM
+// turns. The commit uses `-c user.name -c user.email` rather than
+// `git config` so we don't write identity into the user's repo config.
 //
 // Required latches:
 //   - allowInit == true OR interactive prompt answered "yes"
@@ -274,10 +313,26 @@ func runAutoInit(ctx context.Context, workDir string, allowInit bool, interactiv
 	if err := safetyLatches(ctx, workDir); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", workDir, "init", "-q")
-	cmd.Env = gitSafeEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
+	initCmd := exec.CommandContext(ctx, "git", "-C", workDir, "init", "-q")
+	initCmd.Env = gitProbeEnv()
+	if out, err := initCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git init failed: %w: %s", err, out)
+	}
+	// Empty initial commit so HEAD is born. Uses ephemeral `-c` identity
+	// so we don't mutate the user's git config. We rely on the default
+	// commit hook configuration (no --no-verify, no -c commit.gpgsign=false)
+	// — if the user has gpg signing globally enforced and it fails, we
+	// surface the underlying git error so they can fix the environment
+	// rather than silently producing an unsigned commit they didn't
+	// expect. The clean repo we just created has no hooks, so the only
+	// failure mode is gpg.
+	commitCmd := exec.CommandContext(ctx, "git", "-C", workDir,
+		"-c", "user.name=tracker",
+		"-c", "user.email=tracker@2389.ai",
+		"commit", "--allow-empty", "-m", "tracker: initial empty commit (auto-init)")
+	commitCmd.Env = gitProbeEnv()
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit (initial) failed: %w: %s", err, out)
 	}
 	return nil
 }
@@ -323,7 +378,7 @@ func safetyLatches(ctx context.Context, workDir string) error {
 	absResolved := resolveSymlinksOrFallback(abs)
 	if home, err := os.UserHomeDir(); err == nil {
 		homeResolved := resolveSymlinksOrFallback(filepath.Clean(home))
-		if absResolved == homeResolved {
+		if samePathForLatch(absResolved, homeResolved) {
 			return fmt.Errorf("%w: workdir equals $HOME (%s).\n\n  Initializing a repo at $HOME would place every file under your home tree into the repo's tracking space. cd into a project subdirectory first, or run `git init` here manually if this really is what you want.", ErrGitAutoInitRefused, home)
 		}
 	}
@@ -331,8 +386,10 @@ func safetyLatches(ctx context.Context, workDir string) error {
 	// filepath.VolumeName("/") returns "" and the equality reduces to
 	// abs == "/". On Windows, filepath.Abs("C:\\") returns "C:\" and the
 	// equality compares against "C:\\" (VolumeName "C:" + separator "\\"),
-	// matching the documented "/" refusal across platforms.
-	if absResolved == filepath.VolumeName(absResolved)+string(filepath.Separator) {
+	// matching the documented "/" refusal across platforms. Use the
+	// case-aware comparison so a Windows caller spelling the drive
+	// letter `c:\\` vs `C:\\` still triggers the refusal.
+	if samePathForLatch(absResolved, filepath.VolumeName(absResolved)+string(filepath.Separator)) {
 		return fmt.Errorf("%w: workdir is filesystem root (%s).\n\n  cd into a project subdirectory first.", ErrGitAutoInitRefused, absResolved)
 	}
 	// Use safetyLatches's `--git-dir` check (NOT `--is-inside-work-tree` like
@@ -356,7 +413,7 @@ func safetyLatches(ctx context.Context, workDir string) error {
 		return fmt.Errorf("%w: resolve git in PATH: %v", ErrGitAutoInitRefused, lerr)
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", abs, "rev-parse", "--git-dir")
-	cmd.Env = gitSafeEnv()
+	cmd.Env = gitProbeEnv()
 	out, runErr := cmd.Output()
 	if runErr != nil {
 		// Four cases:
@@ -383,7 +440,7 @@ func safetyLatches(ctx context.Context, workDir string) error {
 		// Inside some kind of repo. Distinguish bare vs work-tree for a
 		// clearer error message.
 		bareCmd := exec.CommandContext(ctx, "git", "-C", abs, "rev-parse", "--is-bare-repository")
-		bareCmd.Env = gitSafeEnv()
+		bareCmd.Env = gitProbeEnv()
 		bareOut, bareErr := bareCmd.Output()
 		if bareErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -434,7 +491,7 @@ func checkGit(ctx context.Context, workDir string) (installed bool, isRepo bool,
 	}
 	installed = true
 	cmd := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "--is-inside-work-tree")
-	cmd.Env = gitSafeEnv()
+	cmd.Env = gitProbeEnv()
 	out, runErr := cmd.Output()
 	if runErr == nil {
 		// Exit 0 outcomes:

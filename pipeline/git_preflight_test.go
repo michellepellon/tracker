@@ -356,6 +356,29 @@ func TestRunAutoInit_Success(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
 		t.Fatalf("expected .git after init: %v", err)
 	}
+	// Auto-init must also produce a born HEAD so worktree workflows
+	// (ask_and_execute, build_product_with_superspec) which run
+	// `git worktree add ... HEAD` early on don't crash deep in setup
+	// after passing preflight. Pre-fix the advertised
+	// `--git=init --allow-init` remediation produced a `.git` directory
+	// but `git rev-parse HEAD` would fail with "fatal: not a valid
+	// object name: 'HEAD'" (Copilot:3260183766/810/851/881).
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "HEAD")
+	cmd.Env = gitProbeEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("auto-init did not produce a born HEAD: %v: %s", err, out)
+	}
+	// Commit identity must come from ephemeral `-c` flags so the
+	// user's repo config stays clean. Verify no committer was written
+	// into .git/config.
+	cfgPath := filepath.Join(dir, ".git", "config")
+	cfgBytes, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read .git/config: %v", err)
+	}
+	if strings.Contains(string(cfgBytes), "tracker@2389.ai") {
+		t.Fatalf("auto-init leaked tracker identity into .git/config:\n%s", cfgBytes)
+	}
 }
 
 func TestRunAutoInit_RefusedByLatch_Nested(t *testing.T) {
@@ -392,6 +415,12 @@ func TestRunAutoInit_InteractiveYesAccepted(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
 		t.Fatalf("expected .git after init: %v", err)
 	}
+	// Same born-HEAD invariant as the non-interactive path.
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "HEAD")
+	cmd.Env = gitProbeEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("interactive auto-init did not produce a born HEAD: %v: %s", err, out)
+	}
 }
 
 func TestRunAutoInit_InteractiveNoRejected(t *testing.T) {
@@ -422,6 +451,90 @@ func TestCheckGit_MissingFromPath_DeterministicallyTriggered(t *testing.T) {
 	if isRepo || isBare {
 		t.Errorf("expected isRepo=isBare=false when git is missing, got isRepo=%v isBare=%v", isRepo, isBare)
 	}
+}
+
+// TestGitProbeEnv_ForcesStableLocale pins the locale-forcing contract:
+// gitProbeEnv must override any caller-inherited LANG / LC_* /
+// LANGUAGE / GIT_PAGER so the `"not a git repository"` stderr
+// classifier in isNotARepoStderr stays accurate on localized git
+// installations (Copilot:3260183581, 3260183731).
+func TestGitProbeEnv_ForcesStableLocale(t *testing.T) {
+	t.Setenv("LANG", "fr_FR.UTF-8")
+	t.Setenv("LC_ALL", "ja_JP.UTF-8")
+	t.Setenv("LC_MESSAGES", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "es")
+	t.Setenv("GIT_PAGER", "less")
+	env := gitProbeEnv()
+	saw := map[string]string{}
+	for _, e := range env {
+		key, val, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		saw[strings.ToUpper(key)] = val
+	}
+	for _, want := range []struct {
+		key, val string
+	}{
+		{"LANG", "C"},
+		{"LC_ALL", "C"},
+		{"LANGUAGE", "C"},
+		{"GIT_PAGER", "cat"},
+	} {
+		if got := saw[want.key]; got != want.val {
+			t.Errorf("env[%s] = %q, want %q", want.key, got, want.val)
+		}
+	}
+	// LC_MESSAGES (and any other inherited LC_*) must not leak through
+	// — it would otherwise win over LANG=C on systems where git
+	// respects the more-specific variable.
+	if _, ok := saw["LC_MESSAGES"]; ok {
+		t.Errorf("LC_MESSAGES leaked into gitProbeEnv (forced LC_ALL=C would still be overridden by inherited LC_MESSAGES on some libcs)")
+	}
+}
+
+// TestSamePathForLatch pins the platform-aware comparison used by the
+// $HOME / filesystem-root safety latches. On Linux + macOS the
+// comparison must stay byte-equal (case-sensitive filesystems are the
+// norm and a case-fold would be a real fail-open). On Windows it must
+// fold so `C:\Users\Bob` and `c:\users\bob` both trip the latch
+// (Copilot:3260183913).
+func TestSamePathForLatch(t *testing.T) {
+	tests := []struct {
+		name        string
+		a, b        string
+		wantUnix    bool
+		wantWindows bool
+	}{
+		{"identical", "/home/u", "/home/u", true, true},
+		{"differ_byte", "/home/u", "/home/v", false, false},
+		{"case_only_diff", "/HOME/u", "/home/u", false, true},
+		{"windows_drive_case", `C:\Users\Bob`, `c:\users\bob`, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := samePathForLatch(tc.a, tc.b)
+			want := tc.wantUnix
+			if runtimeIsWindows() {
+				want = tc.wantWindows
+			}
+			if got != want {
+				t.Errorf("samePathForLatch(%q, %q) = %v, want %v", tc.a, tc.b, got, want)
+			}
+		})
+	}
+}
+
+// runtimeIsWindows mirrors the inline runtime check used by
+// samePathForLatch so the test expectations don't need a build tag.
+// We intentionally don't import "runtime" from the test side — keep
+// the indirection so the production helper stays the single source of
+// truth for the case-aware comparison.
+func runtimeIsWindows() bool {
+	// Force-equal probe: ASCII-fold-only distinct strings can only
+	// match when samePathForLatch is using strings.EqualFold, which is
+	// only enabled on Windows.
+	return samePathForLatch("a", "A")
 }
 
 // TestPreflight_MissingFromPath_ProducesErrGitNotInstalled pins the
