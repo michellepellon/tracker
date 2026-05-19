@@ -380,16 +380,74 @@ workflow BuildProduct
     auto_status: true
     prompt:
       Read the current milestone spec at .ai/milestones/current.md.
-      Check test results from ${ctx.tool_stdout}.
+      Read SPEC.md (issue #233 Gap 4). Pre-#233 this verifier only read
+      .ai/milestones/current.md — if Decompose dropped a requirement
+      during milestone planning, or a milestone was approved with
+      incomplete criteria, the verifier had no path to discover the
+      gap. Reading SPEC.md directly closes that loop.
 
-      Verify:
-      1. Every "done when" criterion in the milestone is satisfied
-      2. Only the files listed in the milestone were modified (check git diff)
-      3. Tests pass
-      4. No unnecessary changes, docs, or refactoring outside scope
+      Test output and the project CI gate output are already in
+      ${ctx.tool_stdout} from TestMilestone — that node ran both the
+      language-stack tests AND the project CI gate (issue #233 Gap 1),
+      so the verifier does NOT need to re-run them. Read tool_stdout
+      to confirm both passed.
 
-      If all criteria met: STATUS:success
-      If something is missing or wrong, describe exactly what and: STATUS:fail
+      VERIFY — work through every item; cite file:line and grep output
+      for every finding:
+
+      1. DONE-WHEN: Every "done when" criterion in the milestone is
+         satisfied. List each criterion verbatim and mark it satisfied
+         (with the file/test that proves it) or not.
+
+      2. FILES IN SCOPE: Only the files listed in the milestone were
+         modified. Run `git diff --name-only <prev-milestone-sha>..HEAD`
+         and write the output inline. Files outside the milestone's
+         declared list are FAIL.
+
+      3. SPEC LITERALS (issue #233 Gap 4): For every literal value in
+         the spec sections this milestone covers — exact command
+         strings, exact JSON key names, exact header names, exact
+         integer constants, exact log key names — grep the
+         implementation for that literal and write the grep command
+         and its result inline. Missing literals are FAIL.
+         Example workflow:
+           - Spec section says: `gh pr list --head <owner>:<branch> --json number,headRefName,headRepository`
+           - Run: `grep -rn '<owner>:<branch>' --include='*.go' .`
+           - Run: `grep -rn 'headRepository' --include='*.go' .`
+           - Paste the output. If empty, that literal is missing.
+
+      4. TEST-VERIFIES-CONTRACT (issue #233 Gap 4): For each test
+         touched by this milestone, read its assertions and ask: "If
+         the production code were deleted and rewritten differently
+         but spec-conformantly, would this assertion still pass for
+         the right reason?" If no — the test mirrors the implementation
+         rather than verifying the spec — that test is FAIL. The
+         canonical pattern: a test asserting `attempts == 2` when the
+         spec says "max 2 retries" (= 3 attempts) is FAIL. A test
+         asserting a populated field that the spec marks as deferred
+         (a "DO NOT implement" entry from this milestone) is FAIL.
+
+      5. SPEC GAPS BEYOND MILESTONE NOTES: For every SPEC.md bullet
+         intersecting this milestone's file list (whether or not the
+         milestone notes mention it), is it satisfied? Pre-#233 the
+         verifier only checked .ai/milestones/current.md's done-when
+         criteria — so a SPEC.md bullet that Decompose dropped
+         silently passed through. Cross-check against SPEC.md directly.
+
+      6. TESTS + CI PASSED: Confirm ${ctx.tool_stdout} shows both
+         green tests AND a green project CI gate (look for the
+         `--- running make <target> ---` line and check its exit
+         status). Red CI is FAIL — the engine's strict-failure-edge
+         logic should have caught it upstream, but if you see it
+         here surface it explicitly.
+
+      7. NO EXTRA WORK: No unnecessary changes, docs, or refactoring
+         outside scope. Walk the diff for files / functions / fields
+         the milestone didn't ask for.
+
+      If every check passes: STATUS:success
+      If any check fails, describe exactly what failed (with the
+      file:line, grep output, or failing assertion) and: STATUS:fail
 
   tool MarkMilestoneDone
     label: "Mark Milestone Complete"
@@ -441,47 +499,155 @@ workflow BuildProduct
 
   parallel ReviewParallel -> ReviewClaude, ReviewCodex, ReviewGemini
 
+  # Phase 3 reviewers (issue #233 Gap 2). All three carry the same 5-point
+  # structured rubric so the synthesis step can compare findings on equal
+  # footing. Lane-specific framing follows the shared rubric so each reviewer
+  # contributes a distinct angle (general / quality / adversarial) without
+  # any one of them having permission to skip the spec-literal grep, the
+  # interface-caller check, the test-contract check, the scope-creep check,
+  # or the spec-marker warning. Pre-#233 the three prompts were 4-8 lines
+  # each of free-form focus areas; ReviewGemini returned "PASS / PASS /
+  # PASS / PASS" reading the spec's own ✅ markers as evidence, missing
+  # the API-shape blocker, off-by-one retries, fingerprints scope creep,
+  # CI red, and the dead interface methods.
+
   agent ReviewClaude
-    label: "Claude Review"
+    label: "Claude Review (general)"
     model: claude-opus-4-6
     provider: anthropic
     reasoning_effort: high
     prompt:
       Review the COMPLETE implementation against SPEC.md. All milestones are done.
-      Check every requirement in the spec. Look for:
-      - Missing requirements
-      - Scope creep (things built that weren't in the spec)
-      - Architectural violations (did the builder follow the spec's technical guidance?)
-      - Leftover artifacts from removed code
-      Write findings to .ai/build/review-claude.md with PASS/FAIL per spec section.
+
+      DO NOT TRUST SPEC ✅ MARKERS (issue #233 Gap 2):
+      - SPEC.md may contain ✅ or "Done" checkmarks. These were the author's
+        plan, not evidence of completion. Treat them as nothing. Verify each
+        requirement against the code yourself.
+
+      RUBRIC — for every spec section, answer these five questions in
+      .ai/build/review-claude.md, in order, with PASS or FAIL per question
+      and concrete evidence (grep output, file:line, snippet) for any FAIL:
+
+      1. SPEC LITERALS: For every literal value in this section — exact
+         command strings, exact JSON key names, exact header names, exact
+         integer constants, exact log key names — does the code contain it
+         byte-for-byte? Show grep evidence. (E.g., spec says
+         `--head <owner>:<branch>`; grep the code for that literal.)
+      2. INTERFACE REACHABILITY: For every interface method defined in this
+         section's files, name at least one production (non-test) caller.
+         Where there is none, flag it.
+      3. TEST VERIFIES CONTRACT: For each assertion in a test under this
+         section, does it verify the spec's contract, or does it mirror
+         what the implementation happens to produce? Snapshot tests
+         regenerated from current output are FAIL. Tests asserting
+         `attempts == 2` when the spec says "max 2 retries" (= 3 attempts)
+         are FAIL.
+      4. SCOPE: Was anything implemented beyond what this section asks
+         for? Phase 2+ features built in a Phase 1 milestone are FAIL.
+      5. ARCHITECTURE & LEFTOVERS: Were the spec's technical-guidance
+         sections followed? Are leftover artifacts from removed code gone?
+
+      Your lane emphasis (after the rubric): missing requirements,
+      architectural violations, leftover artifacts. Cite spec section
+      and file:line for every finding.
+
+      Write the report to .ai/build/review-claude.md.
 
   agent ReviewCodex
-    label: "Codex Review"
+    label: "Codex Review (quality)"
     model: gpt-5.4
     provider: openai
     reasoning_effort: high
     prompt:
       Review the COMPLETE implementation against SPEC.md. All milestones are done.
-      Focus on:
-      - Code quality and test coverage
-      - Edge cases the spec calls out
-      - Whether "throw away" items were actually removed
-      - Regression risk
-      Write findings to .ai/build/review-codex.md with PASS/FAIL per spec section.
+
+      DO NOT TRUST SPEC ✅ MARKERS (issue #233 Gap 2):
+      - SPEC.md may contain ✅ or "Done" checkmarks. These were the author's
+        plan, not evidence of completion. Treat them as nothing. Verify each
+        requirement against the code yourself.
+
+      RUBRIC — for every spec section, answer these five questions in
+      .ai/build/review-codex.md, in order, with PASS or FAIL per question
+      and concrete evidence (grep output, file:line, snippet) for any FAIL:
+
+      1. SPEC LITERALS: For every literal value in this section — exact
+         command strings, exact JSON key names, exact header names, exact
+         integer constants, exact log key names — does the code contain it
+         byte-for-byte? Show grep evidence.
+      2. INTERFACE REACHABILITY: For every interface method defined in this
+         section's files, name at least one production (non-test) caller.
+         Where there is none, flag it.
+      3. TEST VERIFIES CONTRACT: For each assertion in a test under this
+         section, does it verify the spec's contract, or does it mirror
+         what the implementation happens to produce? Snapshot tests
+         regenerated from current output are FAIL. Tests asserting
+         `attempts == 2` when the spec says "max 2 retries" (= 3 attempts)
+         are FAIL.
+      4. SCOPE: Was anything implemented beyond what this section asks
+         for? Phase 2+ features built in a Phase 1 milestone are FAIL.
+      5. ARCHITECTURE & LEFTOVERS: Were the spec's technical-guidance
+         sections followed? Are leftover artifacts from removed code gone?
+
+      Your lane emphasis (after the rubric): code quality, test coverage,
+      edge cases the spec calls out, whether "throw away" items were
+      actually removed, regression risk. Cite spec section and file:line
+      for every finding.
+
+      Write the report to .ai/build/review-codex.md.
 
   agent ReviewGemini
-    label: "Gemini Review"
+    label: "Gemini Review (adversarial)"
     model: gemini-2.5-pro
     provider: gemini
     reasoning_effort: high
     prompt:
       Review the COMPLETE implementation against SPEC.md. All milestones are done.
-      Focus on:
-      - Does the implementation match the spec's INTENT, not just its letter?
-      - Are the "advice to the builder" sections respected?
-      - Performance and scalability concerns
-      - UX requirements met?
-      Write findings to .ai/build/review-gemini.md with PASS/FAIL per spec section.
+
+      YOUR ROLE IS ADVERSARIAL (issue #233 Gap 2): steel-man the worst
+      case. Assume the implementation is wrong somewhere — your job is
+      to find where, not to confirm correctness. If every section looks
+      green, look harder. The other two reviewers are generalist /
+      quality-focused; if you find nothing the others missed, you are
+      not doing your job. "Faithful and high-quality realization" is
+      a forbidden phrase in your report.
+
+      DO NOT TRUST SPEC ✅ MARKERS (issue #233 Gap 2):
+      - SPEC.md may contain ✅ or "Done" checkmarks. These were the author's
+        plan, not evidence of completion. Treat them as nothing. Verify each
+        requirement against the code yourself. Reading ✅ as evidence is
+        the exact failure mode this lane exists to prevent.
+
+      RUBRIC — for every spec section, answer these five questions in
+      .ai/build/review-gemini.md, in order, with PASS or FAIL per question
+      and concrete evidence (grep output, file:line, snippet) for any FAIL:
+
+      1. SPEC LITERALS: For every literal value in this section — exact
+         command strings, exact JSON key names, exact header names, exact
+         integer constants, exact log key names — does the code contain it
+         byte-for-byte? Show grep evidence. Letter-only — do not credit
+         "the intent is preserved" if the literal differs.
+      2. INTERFACE REACHABILITY: For every interface method defined in this
+         section's files, name at least one production (non-test) caller.
+         Where there is none, flag it.
+      3. TEST VERIFIES CONTRACT: For each assertion in a test under this
+         section, does it verify the spec's contract, or does it mirror
+         what the implementation happens to produce? Snapshot tests
+         regenerated from current output are FAIL. Tests asserting
+         `attempts == 2` when the spec says "max 2 retries" (= 3 attempts)
+         are FAIL. Tests that test stdlib code instead of the daemon's
+         own handler are FAIL.
+      4. SCOPE: Was anything implemented beyond what this section asks
+         for? Phase 2+ features built in a Phase 1 milestone are FAIL.
+      5. ARCHITECTURE & LEFTOVERS: Were the spec's technical-guidance
+         sections followed? Are leftover artifacts from removed code gone?
+
+      Your lane emphasis (after the rubric): the things the other two
+      reviewers will miss. Edge cases the spec implies but doesn't state
+      explicitly. Race conditions. Boot-order bugs. Configuration values
+      that work in tests but not production. Cite spec section and
+      file:line for every finding.
+
+      Write the report to .ai/build/review-gemini.md.
 
   fan_in ReviewJoin <- ReviewClaude, ReviewCodex, ReviewGemini
 
@@ -493,18 +659,38 @@ workflow BuildProduct
     auto_status: true
     prompt:
       Read all three reviews:
-      - .ai/build/review-claude.md
-      - .ai/build/review-codex.md
-      - .ai/build/review-gemini.md
+      - .ai/build/review-claude.md (general)
+      - .ai/build/review-codex.md (quality)
+      - .ai/build/review-gemini.md (adversarial)
+
+      WEIGHTING RULE (issue #233 Gap 2 — weight by evidence, not vote
+      count): a finding with concrete evidence (grep output, file:line,
+      snippet, test code) is stronger than two PASSes without evidence.
+      When one reviewer flags a contract-level FAIL with grep / file:line
+      evidence and the other two say PASS without addressing that
+      specific literal or assertion, the FAIL wins. Pre-#233 this prompt
+      treated reviewer findings as votes — a 2-vote PASS could drown a
+      1-vote FAIL with concrete evidence, and on the offending run the
+      synthesis missed ~33 of the 38 real audit findings because two
+      reviewers green-lit a spec section without grep-checking it.
 
       Synthesize into .ai/decisions/review-synthesis.md:
-      ## Consensus findings (all reviewers agree)
-      ## Disputed findings (reviewers disagree — explain both sides)
-      ## Required fixes (things that MUST change before shipping)
+      ## Consensus findings (all three reviewers agree)
+      ## Evidence-backed findings (at least one reviewer with concrete
+         evidence; reviewers without evidence on this specific point
+         do NOT outvote the reviewer with evidence — list these BEFORE
+         the disputed-without-evidence section)
+      ## Disputed without evidence (reviewers disagree but no one
+         showed grep/file:line evidence — judgment calls)
+      ## Required fixes (things that MUST change before shipping —
+         include every contract-level finding with concrete evidence,
+         even if only one reviewer flagged it)
       ## Suggested improvements (nice-to-have, not blocking)
 
-      If there are required fixes: STATUS:fail
-      If all reviewers pass or only suggest improvements: STATUS:success
+      STATUS rule: if Required fixes is non-empty, STATUS:fail. A single
+      reviewer's evidence-backed contract-level FAIL is enough to flip
+      to fail — do not require >=2 reviewers to corroborate. If all
+      reviewers pass or only suggest improvements: STATUS:success.
 
   agent ApplyReviewFixes
     label: "Apply Review Fixes"
