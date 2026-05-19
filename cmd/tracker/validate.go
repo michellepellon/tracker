@@ -72,20 +72,20 @@ func buildValidationRegistry() *pipeline.HandlerRegistry {
 // DIP1XX lint warnings are stored on graph.LintWarnings AND folded into
 // result.Warnings by validateGraph (so non-CLI consumers of the validator see
 // them via the single warnings channel). The loader has already printed the
-// long-form version of each DIP1XX warning to stderr; printing the short-form
-// duplicate from result.Warnings here would emit the same warning twice
-// (#244). We dedupe at print time by skipping entries that match the
-// pre-formatted strings on graph.LintWarnings, leaving only tracker-side
-// semantic warnings (e.g. conditionalFailEdges, edgeLabelConsistency) to
-// reach stdout. The summary count uses len(result.Warnings) unchanged —
-// the user-visible count still reflects every distinct warning.
+// long-form version of each DIP1XX warning to stderr; emitting the short-form
+// copy from result.Warnings here would render the same warning twice (#244).
+// We skip every result.Warnings entry whose text matches a string in
+// graph.LintWarnings, so stdout carries only tracker-side semantic warnings
+// (e.g. conditionalFailEdges, edgeLabelConsistency). The summary count uses
+// len(result.Warnings) — DIP warnings are still counted toward the total
+// even though their text is emitted on stderr by the loader rather than here.
 func printValidationResult(w io.Writer, displayName string, graph *pipeline.Graph, result *pipeline.ValidationError) error {
 	if result == nil {
 		fmt.Fprintf(w, "%s: valid (%d nodes, %d edges)\n", displayName, len(graph.Nodes), len(graph.Edges))
 		return nil
 	}
 
-	lintDups := loaderEmittedWarnings(graph)
+	lintDups := graphLintWarningSet(graph)
 	for _, warn := range result.Warnings {
 		if lintDups[warn] {
 			continue
@@ -105,11 +105,13 @@ func printValidationResult(w io.Writer, displayName string, graph *pipeline.Grap
 	return nil
 }
 
-// loaderEmittedWarnings returns the set of warning lines the .dip / .dipx
-// loader has already printed to stderr (long-form) so callers can skip the
-// short-form duplicates in result.Warnings. Nil-safe; returns an empty map
-// when there are no lint warnings.
-func loaderEmittedWarnings(graph *pipeline.Graph) map[string]bool {
+// graphLintWarningSet returns graph.LintWarnings as a lookup set. These are
+// the pre-formatted single-line "warning[DIPnnn]: ..." strings the dippin
+// loader stashed on the graph and that validateGraph then appended to
+// ValidationError.Warnings. printValidationResult uses this set to skip
+// emitting those same strings on stdout — they have already been printed
+// in long form by the loader to stderr at load time. Nil-safe.
+func graphLintWarningSet(graph *pipeline.Graph) map[string]bool {
 	if graph == nil || len(graph.LintWarnings) == 0 {
 		return map[string]bool{}
 	}

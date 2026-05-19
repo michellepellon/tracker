@@ -151,10 +151,9 @@ func TestValidateDipxBundle(t *testing.T) {
 }
 
 // dipWithLintWarning is a minimal valid .dip workflow that triggers DIP110
-// (empty agent prompt) on a middle codergen node. Start and exit are exempt
-// because the adapter retypes bare agent-shaped start/exit nodes to dedicated
-// start/exit handlers, so the middle agent is the one that lands as a
-// codergen-with-no-prompt and trips the lint.
+// (empty agent prompt) on a middle agent node. dippin-lang's DIP110 check
+// exempts start and exit lifecycle nodes by design (see dippin README), so
+// a middle agent with no prompt is needed to actually trip the lint.
 const dipWithLintWarning = `workflow validate_lint_dup
   start: a
   exit: c
@@ -221,10 +220,19 @@ func captureStderr(t *testing.T, fn func()) string {
 // TestValidateNoDuplicateLintWarnings is the regression test for #244:
 // `tracker validate` was printing every DIP1XX warning twice — once in long
 // form from the loader's stderr diagnostic path, once in short form from
-// LintWarnings folded into the validator's warnings channel. The fix removes
-// the duplicate from CLI stdout by skipping entries that match the
-// pre-formatted strings on graph.LintWarnings. Capture both streams and
-// assert each DIP code appears exactly once across the combined output.
+// LintWarnings folded into the validator's warnings channel. The fix
+// suppresses the short-form copy from stdout by skipping entries that match
+// the pre-formatted strings on graph.LintWarnings.
+//
+// We assert the precise contract of the fix:
+//  1. stderr carries at least one `warning[DIP` line (loader did its job)
+//  2. stdout carries ZERO `warning[DIP` lines (CLI suppressed the duplicate)
+//  3. summary line still reports a non-zero warning count (DIP warnings
+//     are counted via len(result.Warnings), not via what we printed)
+//
+// This is intentionally not a "one occurrence per DIP code" check —
+// multiple nodes can legitimately trip the same code in a real workflow.
+// The dedup target is "loader-emitted strings", not "code uniqueness".
 func TestValidateNoDuplicateLintWarnings(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "lint_dup.dip")
@@ -239,20 +247,14 @@ func TestValidateNoDuplicateLintWarnings(t *testing.T) {
 		}
 	})
 
-	combined := stderr + stdout.String()
+	dipRE := regexp.MustCompile(`warning\[DIP\d+\]`)
 
-	dipRE := regexp.MustCompile(`warning\[(DIP\d+)\]`)
-	counts := map[string]int{}
-	for _, m := range dipRE.FindAllStringSubmatch(combined, -1) {
-		counts[m[1]]++
+	if !dipRE.MatchString(stderr) {
+		t.Errorf("expected loader to emit at least one warning[DIPnnn] line on stderr, got:\n%s", stderr)
 	}
-	if len(counts) == 0 {
-		t.Fatalf("expected at least one DIP1XX warning, got none.\ncombined:\n%s", combined)
-	}
-	for code, n := range counts {
-		if n != 1 {
-			t.Errorf("%s appeared %d times in combined output, want exactly 1.\ncombined:\n%s", code, n, combined)
-		}
+
+	if loc := dipRE.FindStringIndex(stdout.String()); loc != nil {
+		t.Errorf("stdout still contains a warning[DIPnnn] line that the loader already printed to stderr (#244 regression).\nstdout:\n%s", stdout.String())
 	}
 
 	// The summary line must still report the DIP warning in its count.
