@@ -69,29 +69,27 @@ func buildValidationRegistry() *pipeline.HandlerRegistry {
 
 // printValidationResult writes the validation outcome to w and returns an error on failures.
 //
-// The "valid with N warning(s)" total counts both result.Warnings (tracker
-// semantic warnings) AND graph.LintWarnings (dippin-lang DIP1XX warnings).
-// DIP1XX warnings deliberately do not flow through result.Warnings — that path
-// previously caused #244, where each warning was printed twice (long form on
-// stderr from the loader, short form on stdout from here). The long form
-// remains the canonical user-visible output and is emitted once by the loader.
+// DIP1XX lint warnings are stored on graph.LintWarnings AND folded into
+// result.Warnings by validateGraph (so non-CLI consumers of the validator see
+// them via the single warnings channel). The loader has already printed the
+// long-form version of each DIP1XX warning to stderr; printing the short-form
+// duplicate from result.Warnings here would emit the same warning twice
+// (#244). We dedupe at print time by skipping entries that match the
+// pre-formatted strings on graph.LintWarnings, leaving only tracker-side
+// semantic warnings (e.g. conditionalFailEdges, edgeLabelConsistency) to
+// reach stdout. The summary count uses len(result.Warnings) unchanged —
+// the user-visible count still reflects every distinct warning.
 func printValidationResult(w io.Writer, displayName string, graph *pipeline.Graph, result *pipeline.ValidationError) error {
-	lintCount := 0
-	if graph != nil {
-		lintCount = len(graph.LintWarnings)
-	}
-
 	if result == nil {
-		if lintCount > 0 {
-			fmt.Fprintf(w, "%s: valid with %d warning(s) (%d nodes, %d edges)\n",
-				displayName, lintCount, len(graph.Nodes), len(graph.Edges))
-			return nil
-		}
 		fmt.Fprintf(w, "%s: valid (%d nodes, %d edges)\n", displayName, len(graph.Nodes), len(graph.Edges))
 		return nil
 	}
 
+	lintDups := loaderEmittedWarnings(graph)
 	for _, warn := range result.Warnings {
+		if lintDups[warn] {
+			continue
+		}
 		fmt.Fprintf(w, "%s\n", warn)
 	}
 
@@ -103,8 +101,23 @@ func printValidationResult(w io.Writer, displayName string, graph *pipeline.Grap
 	}
 
 	fmt.Fprintf(w, "%s: valid with %d warning(s) (%d nodes, %d edges)\n",
-		displayName, len(result.Warnings)+lintCount, len(graph.Nodes), len(graph.Edges))
+		displayName, len(result.Warnings), len(graph.Nodes), len(graph.Edges))
 	return nil
+}
+
+// loaderEmittedWarnings returns the set of warning lines the .dip / .dipx
+// loader has already printed to stderr (long-form) so callers can skip the
+// short-form duplicates in result.Warnings. Nil-safe; returns an empty map
+// when there are no lint warnings.
+func loaderEmittedWarnings(graph *pipeline.Graph) map[string]bool {
+	if graph == nil || len(graph.LintWarnings) == 0 {
+		return map[string]bool{}
+	}
+	out := make(map[string]bool, len(graph.LintWarnings))
+	for _, w := range graph.LintWarnings {
+		out[w] = true
+	}
+	return out
 }
 
 // mockHandler is a minimal handler implementation for validation purposes.

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/2389-research/tracker/internal/dipxtest"
+	"github.com/2389-research/tracker/pipeline"
 )
 
 const validDOT = `digraph test {
@@ -176,35 +177,54 @@ const dipWithLintWarning = `workflow validate_lint_dup
 // bytes written. Used by TestValidateNoDuplicateLintWarnings to assert the
 // long-form diagnostic (printed to stderr by loadDippinPipeline) does not get
 // re-emitted on stdout by printValidationResult — the bug #244 fixed.
+//
+// Cleanup is single-pass: an inner func() wraps fn so a deferred close of
+// the pipe write end and restore of os.Stderr fires whether fn returns
+// normally or panics. The reader goroutine closes the read end via its own
+// defer before sending the result, so neither end of the pipe leaks. Any
+// io.ReadAll error is surfaced via t.Fatalf rather than swallowed.
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	orig := os.Stderr
 	r, w, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("pipe: %v", err)
+		t.Fatalf("captureStderr: pipe: %v", err)
 	}
 	os.Stderr = w
-	done := make(chan []byte, 1)
+
+	type readResult struct {
+		bytes []byte
+		err   error
+	}
+	done := make(chan readResult, 1)
 	go func() {
-		b, _ := io.ReadAll(r)
-		done <- b
+		defer func() { _ = r.Close() }()
+		b, err := io.ReadAll(r)
+		done <- readResult{bytes: b, err: err}
 	}()
-	defer func() {
-		_ = w.Close()
-		os.Stderr = orig
+
+	func() {
+		defer func() {
+			_ = w.Close()
+			os.Stderr = orig
+		}()
+		fn()
 	}()
-	fn()
-	_ = w.Close()
-	os.Stderr = orig
-	return string(<-done)
+
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("captureStderr: read pipe: %v", result.err)
+	}
+	return string(result.bytes)
 }
 
 // TestValidateNoDuplicateLintWarnings is the regression test for #244:
 // `tracker validate` was printing every DIP1XX warning twice — once in long
 // form from the loader's stderr diagnostic path, once in short form from
 // LintWarnings folded into the validator's warnings channel. The fix removes
-// the second emission. Capture both streams and assert each DIP code appears
-// exactly once across the combined output.
+// the duplicate from CLI stdout by skipping entries that match the
+// pre-formatted strings on graph.LintWarnings. Capture both streams and
+// assert each DIP code appears exactly once across the combined output.
 func TestValidateNoDuplicateLintWarnings(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "lint_dup.dip")
@@ -235,14 +255,49 @@ func TestValidateNoDuplicateLintWarnings(t *testing.T) {
 		}
 	}
 
-	// The summary line must still report the DIP warning in its count even
-	// though it no longer flows through ve.Warnings. Drop to 0 would mean
-	// the printValidationResult lintCount add-in regressed.
+	// The summary line must still report the DIP warning in its count.
+	// "valid with 0 warning(s)" would mean the dedup accidentally subtracted
+	// the warning from the total.
 	if !strings.Contains(stdout.String(), "valid with ") {
 		t.Errorf("expected 'valid with N warning(s)' summary on stdout, got:\n%s", stdout.String())
 	}
 	if strings.Contains(stdout.String(), "valid with 0 warning(s)") {
 		t.Errorf("summary undercounted DIP warnings (reported 0):\n%s", stdout.String())
+	}
+}
+
+// TestValidateLintWarningsStillInWarningsChannel guards against accidental
+// regressions of the API contract that PR review (Codex P2 on #245) flagged:
+// pipeline.ValidateAll / ValidateAllWithLint must continue to expose DIP1XX
+// warnings via ValidationError.Warnings so non-CLI consumers
+// (tracker.ValidateSource, tracker_doctor.go::checkPipelineFile,
+// cmd/tracker-conformance) keep seeing them. The CLI dedup happens at print
+// time and must NOT alter this shared validation result.
+func TestValidateLintWarningsStillInWarningsChannel(t *testing.T) {
+	graph, diags, err := pipeline.LoadDippinWorkflow(dipWithLintWarning, "lint_dup.dip")
+	if err != nil {
+		t.Fatalf("LoadDippinWorkflow: %v", err)
+	}
+	if len(diags) == 0 {
+		t.Fatalf("expected at least one diagnostic from LoadDippinWorkflow, got none")
+	}
+	if len(graph.LintWarnings) == 0 {
+		t.Fatalf("expected graph.LintWarnings to be populated, got empty")
+	}
+	ve := pipeline.ValidateAll(graph)
+	if ve == nil {
+		t.Fatalf("ValidateAll returned nil; expected DIP1XX warnings to surface in ve.Warnings")
+	}
+	wantPrefix := "warning[DIP"
+	foundDIP := false
+	for _, w := range ve.Warnings {
+		if strings.HasPrefix(w, wantPrefix) {
+			foundDIP = true
+			break
+		}
+	}
+	if !foundDIP {
+		t.Errorf("ValidateAll dropped DIP1XX warnings from ve.Warnings; non-CLI consumers (tracker.ValidateSource, doctor) would lose this signal.\nve.Warnings: %v\ngraph.LintWarnings: %v", ve.Warnings, graph.LintWarnings)
 	}
 }
 
