@@ -386,11 +386,19 @@ workflow BuildProduct
       incomplete criteria, the verifier had no path to discover the
       gap. Reading SPEC.md directly closes that loop.
 
-      Test output and the project CI gate output are already in
-      ${ctx.tool_stdout} from TestMilestone — that node ran both the
-      language-stack tests AND the project CI gate (issue #233 Gap 1),
-      so the verifier does NOT need to re-run them. Read tool_stdout
-      to confirm both passed.
+      TestMilestone already ran both the language-stack tests AND the
+      project CI gate (issue #233 Gap 1), so the verifier does NOT
+      need to re-run them. Note that `${ctx.tool_stdout}` is the
+      tail of TestMilestone's stdout (64KB cap by default); on a
+      repo with verbose test output the language-test lines may be
+      elided entirely. The authoritative "both passed" signal is the
+      `tests-pass` sentinel — TestMilestone prints it ONLY when both
+      language tests and the CI gate returned 0. Treat its presence
+      in tool_stdout as proof both passed; treat `escalate` as proof
+      of an environment problem (e.g., Makefile present but `make`
+      missing) that the engine's strict-failure-edge logic should
+      have caught upstream. Visible CI probe lines (`--- running
+      make ---`, `INFO: ...`) corroborate but are not required.
 
       VERIFY — work through every item; cite file:line and grep output
       for every finding:
@@ -446,24 +454,31 @@ workflow BuildProduct
          criteria — so a SPEC.md bullet that Decompose dropped
          silently passed through. Cross-check against SPEC.md directly.
 
-      6. TESTS + CI PASSED: Confirm ${ctx.tool_stdout} shows BOTH
-         green language-stack tests AND a valid project-CI outcome.
-         The project-CI probe (from PR #246) has three valid PASS
-         outcomes — accept any of them:
+      6. TESTS + CI PASSED: The `tests-pass` sentinel in
+         ${ctx.tool_stdout} is authoritative — TestMilestone prints
+         it ONLY when both the language-stack tests AND the project
+         CI gate returned 0. If you can see `tests-pass` in the
+         tail, both passed; no further check needed.
+         If the sentinel is NOT visible, the tail may have elided
+         it under a large CI output run; in that case fall back to
+         the visible probe lines:
            (a) `--- running make <target> (project CI gate from <Makefile>) ---`
-               line followed by make output with no errors and no
-               non-zero exit indication. This is a successful CI run.
+               followed by make output with no errors and no non-zero
+               exit indication — a successful CI run.
            (b) `INFO: no Makefile present, no project CI gate to run`
-               — the repo has no Makefile, so the probe correctly
-               skipped. This is PASS, not FAIL.
+               — the repo has no Makefile; valid skip (PASS).
            (c) `INFO: no project CI target in <Makefile> (looked for: ci, check, lint)`
-               — the repo has a Makefile but no matching target, so
-               the probe correctly skipped. Also PASS, not FAIL.
+               — the repo has a Makefile but no matching target;
+               valid skip (PASS).
          FAIL only if you see `--- running make ---` followed by make
-         errors / non-zero exit, or `ERROR: <Makefile> present but
-         'make' not installed` (the latter should have been caught
-         upstream by the engine's strict-failure-edge logic; if it
-         reaches the verifier, surface it explicitly).
+         errors / non-zero exit, or `escalate` / `ERROR: <Makefile>
+         present but 'make' not installed` (the latter two should
+         have been caught upstream by the engine's strict-failure-edge
+         logic; if they reach the verifier, surface explicitly).
+         Do NOT FAIL on absence of visible language-test output —
+         that output is routinely elided by the 64KB tail cap on
+         repos with verbose tests, and the sentinel covers that
+         signal already.
 
       7. NO EXTRA WORK: No unnecessary changes, docs, or refactoring
          outside scope. Walk the diff for files / functions / fields
