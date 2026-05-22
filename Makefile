@@ -132,7 +132,9 @@ complexity-report:
 # DIPPIN_VERSION is derived from go.mod so the local `dippin` binary and
 # the go module always match. This avoids "unrecognized field" failures
 # when a contributor's PATH binary lags behind the dep bump.
-DIPPIN_VERSION := $(shell awk '/github.com\/2389-research\/dippin-lang/ {print $$2}' go.mod)
+# `exit` after the first match so a `replace` directive on the dippin-lang
+# module doesn't bleed into $$2.
+DIPPIN_VERSION := $(shell awk '/github.com\/2389-research\/dippin-lang/ {print $$2; exit}' go.mod)
 DIPPIN := go run github.com/2389-research/dippin-lang/cmd/dippin@$(DIPPIN_VERSION)
 
 lint:

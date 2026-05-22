@@ -1,0 +1,4 @@
+components:
+  X:
+    requirements:
+      1: orphan

@@ -1,0 +1,10 @@
+feature:
+  name: example
+  product: example-product
+  description: minimal fixture
+
+components:
+  AUTH:
+    requirements:
+      1: First auth requirement.
+      2: Second auth requirement.
