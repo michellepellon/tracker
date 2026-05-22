@@ -295,6 +295,12 @@ func (e *Engine) processActiveNode(ctx context.Context, s *runState, currentNode
 	s.pctx.Set(ContextKeyPreferredLabel, "")
 	s.pctx.Set(ContextKeySuggestedNextNodes, "")
 
+	// Populate ${ctx.spec.requirements} / ${ctx.spec.requirements_json} when
+	// this node has Satisfies declarations. Authors interpolate the keys in
+	// their prompt to receive structured ACID context. No-op for nodes
+	// without spec coverage declarations.
+	e.injectSatisfiesContext(s.pctx, node)
+
 	execNode := e.prepareExecNode(node, s)
 
 	outcome, traceEntry, err := e.executeNode(ctx, s, currentNodeID, execNode)
