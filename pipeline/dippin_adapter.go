@@ -180,10 +180,11 @@ func convertNode(irNode *ir.Node) (*Node, error) {
 	}
 
 	gNode := &Node{
-		ID:    irNode.ID,
-		Shape: shape,
-		Label: irNode.Label,
-		Attrs: make(map[string]string),
+		ID:        irNode.ID,
+		Shape:     shape,
+		Label:     irNode.Label,
+		Attrs:     make(map[string]string),
+		Satisfies: append([]string(nil), irNode.Satisfies...),
 	}
 
 	// Extract kind-specific config into attrs

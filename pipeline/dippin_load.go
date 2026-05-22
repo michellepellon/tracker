@@ -2,10 +2,14 @@ package pipeline
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/2389-research/dippin-lang/ir"
 	"github.com/2389-research/dippin-lang/parser"
 	"github.com/2389-research/dippin-lang/validator"
+
+	"github.com/2389-research/tracker/pkg/spec"
 )
 
 // LoadDippinWorkflow parses a dippin-lang source, then delegates to
@@ -63,12 +67,106 @@ func LoadDippinWorkflowFromIR(workflow *ir.Workflow, filename string) (*Graph, [
 	// re-running any DIP check on the tracker side.
 	graph.LintWarnings = formatLintWarnings(lintResult.Diagnostics)
 
+	// If the workflow declared a spec, resolve the loader, load the spec,
+	// and validate every node's satisfies declarations against it. Failures
+	// here are fatal — a workflow that references a missing loader or an
+	// unknown ACID is broken and shouldn't run.
+	if workflow.Spec != nil {
+		if err := attachSpec(graph, workflow, filename); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	// Return all diagnostics (both validation and lint) so callers can log them.
 	var allDiags []validator.Diagnostic
 	allDiags = append(allDiags, valResult.Diagnostics...)
 	allDiags = append(allDiags, lintResult.Diagnostics...)
 
 	return graph, allDiags, nil
+}
+
+// attachSpec resolves the workflow's spec.Loader, loads the document, stashes
+// it on graph.Spec, and validates every node's Satisfies declarations.
+// Bare-ACID misses are fatal; wildcard / range misses become warnings.
+func attachSpec(graph *Graph, workflow *ir.Workflow, filename string) error {
+	loader, ok := spec.Lookup(workflow.Spec.Loader)
+	if !ok {
+		return fmt.Errorf("unknown spec loader %q (registered: %v)",
+			workflow.Spec.Loader, spec.Registered())
+	}
+	path := resolveSpecPath(filename, workflow.Spec.Path)
+	loaded, err := loader.Load(path)
+	if err != nil {
+		return fmt.Errorf("load spec %s: %w", path, err)
+	}
+	graph.Spec = loaded
+	graph.SpecLoader = workflow.Spec.Loader
+
+	warnings, err := validateSatisfies(workflow, loaded)
+	if err != nil {
+		return err
+	}
+	graph.LintWarnings = append(graph.LintWarnings, warnings...)
+	return nil
+}
+
+// resolveSpecPath returns workflow.Spec.Path relative to the directory holding
+// the .dip file. Absolute paths are returned unchanged.
+func resolveSpecPath(filename, specPath string) string {
+	if filepath.IsAbs(specPath) {
+		return specPath
+	}
+	dir := filepath.Dir(filename)
+	return filepath.Join(dir, specPath)
+}
+
+// validateSatisfies walks every node's Satisfies entries and resolves them
+// against the loaded spec. Returns warnings (for wildcard / range patterns
+// that resolve to nothing) and an error (for bare ACIDs that don't exist).
+func validateSatisfies(workflow *ir.Workflow, loaded spec.Spec) ([]string, error) {
+	var warnings []string
+	for _, n := range workflow.Nodes {
+		nodeWarnings, err := validateNodeSatisfies(n.ID, n.Satisfies, loaded)
+		if err != nil {
+			return nil, err
+		}
+		warnings = append(warnings, nodeWarnings...)
+	}
+	return warnings, nil
+}
+
+// validateNodeSatisfies checks every Satisfies entry on a single node.
+func validateNodeSatisfies(nodeID string, refs []string, loaded spec.Spec) ([]string, error) {
+	var warnings []string
+	for _, ref := range refs {
+		warning, err := checkSatisfiesEntry(nodeID, ref, loaded)
+		if err != nil {
+			return nil, err
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+	}
+	return warnings, nil
+}
+
+// checkSatisfiesEntry resolves a single ACID reference and reports whether
+// the result is an error, a warning, or clean.
+func checkSatisfiesEntry(nodeID, ref string, loaded spec.Spec) (warning string, err error) {
+	matches := loaded.Resolve(ref)
+	if len(matches) > 0 {
+		return "", nil
+	}
+	if isBareACID(ref) {
+		return "", fmt.Errorf("node %q satisfies unknown ACID %q", nodeID, ref)
+	}
+	return fmt.Sprintf("warning[TRK-SAT]: node %q satisfies %q resolves to no requirements", nodeID, ref), nil
+}
+
+// isBareACID returns true when ref is a bare ACID (no wildcard, no range) —
+// i.e. a reference that must resolve to exactly one requirement.
+func isBareACID(ref string) bool {
+	return !strings.Contains(ref, "*") && !strings.Contains(ref, "[")
 }
 
 // formatLintWarnings returns single-line "warning[CODE]: message" strings for

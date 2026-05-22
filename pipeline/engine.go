@@ -205,6 +205,12 @@ func (e *Engine) Run(ctx context.Context) (*EngineResult, error) {
 		return nil, err
 	}
 
+	// Seed PipelineContext with prior ACID statuses from the spec reporter
+	// when the workflow attached a spec. Best-effort: unavailable reporter
+	// or transport errors emit a warning and continue with an empty status
+	// set rather than aborting the run.
+	e.pullSpecStatuses(ctx, s.pctx)
+
 	e.emit(PipelineEvent{
 		Type:      EventPipelineStarted,
 		Timestamp: time.Now(),
@@ -335,6 +341,12 @@ func (e *Engine) processActiveNode(ctx context.Context, s *runState, currentNode
 	}
 
 	e.handleOutcomeStatus(s, currentNodeID, outcome.Status)
+
+	// Report satisfies coverage when this node succeeded. Best-effort —
+	// reporter errors emit a warning and never block the workflow.
+	if outcome.Status == OutcomeSuccess {
+		e.pushNodeSuccess(ctx, node)
+	}
 
 	if currentNodeID == e.graph.ExitNode {
 		return e.processExitNode(s, currentNodeID, outcome.Status, &traceEntry)

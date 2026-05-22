@@ -1,0 +1,14 @@
+workflow UnknownLoader
+  goal: "no such loader"
+  spec: nope with_spec_features.yaml
+  start: A
+  exit: B
+
+  agent A
+    prompt: do it
+
+  agent B
+    prompt: done
+
+  edges
+    A -> B
