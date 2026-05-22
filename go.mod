@@ -14,6 +14,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-isatty v0.0.20
 	golang.org/x/term v0.41.0
+	gopkg.in/yaml.v3 v3.0.1
 	pgregory.net/rapid v1.3.0
 )
 
@@ -48,8 +49,7 @@ require (
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	mvdan.cc/sh/v3 v3.13.1 // indirect
 )
 
-replace github.com/2389-research/dippin-lang => github.com/michellepellon/dippin-lang v0.0.0-20260522143351-1e446b99801e
+replace github.com/2389-research/dippin-lang => github.com/michellepellon/dippin-lang v0.0.0-20260522184837-4b620b79ea3b

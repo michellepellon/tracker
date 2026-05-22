@@ -34,6 +34,20 @@ const (
 	SpecRequirementsJSONKey = "spec.requirements_json"
 )
 
+// SpecCoverageKeyPrefix is the PipelineContext key prefix under which the
+// engine reports per-ACID coverage results after a tool node with
+// `verify_acid:` runs. Values are "covered" (literal ACID found in the
+// working tree) or "uncovered" (not found). Authors route edges with
+// `when ctx.spec.coverage.<acid> = uncovered`.
+const SpecCoverageKeyPrefix = "spec.coverage."
+
+// SpecCoverageCovered / SpecCoverageUncovered are the two values
+// verify_acid writes to spec.coverage.<acid>.
+const (
+	SpecCoverageCovered   = "covered"
+	SpecCoverageUncovered = "uncovered"
+)
+
 // pullSpecStatuses calls the matching reporter's Pull (if Available) and
 // seeds the PipelineContext with one internal key per ACID. Best-effort:
 // missing reporter, missing token, transport errors all degrade silently.
@@ -203,6 +217,56 @@ func (e *Engine) shouldInjectSatisfies(node *Node) bool {
 		return false
 	}
 	if node == nil || len(node.Satisfies) == 0 {
+		return false
+	}
+	return true
+}
+
+// verifyNodeACIDs greps the engine's working directory for every ACID listed
+// in node.VerifyACID (after resolving patterns against Graph.Spec) and writes
+// per-ACID coverage results into PipelineContext under spec.coverage.<acid>.
+//
+// Called by the engine after a successful tool node so authors can route on
+// `when ctx.spec.coverage.foo.BAR.1 = uncovered`. Outcome is NOT modified —
+// the tool's exit code remains the source of truth for node success.
+//
+// Best-effort: no spec, no patterns, or unreadable working directory all
+// degrade silently (no panic, no error propagated).
+func (e *Engine) verifyNodeACIDs(pctx *PipelineContext, node *Node) {
+	if !e.shouldVerifyACIDs(node) {
+		return
+	}
+	resolved := resolveSatisfies(node.VerifyACID, e.graph.Spec)
+	if len(resolved) == 0 {
+		return
+	}
+	literals := make([]string, len(resolved))
+	for i, r := range resolved {
+		literals[i] = r.ID
+	}
+	found, err := scanWorkingTreeForLiterals(literals)
+	if err != nil {
+		e.emitSpecWarning(fmt.Sprintf("verify_acid scan on node %q failed: %v", node.ID, err))
+		return
+	}
+	updates := make(map[string]string, len(literals))
+	for _, acid := range literals {
+		if found[acid] {
+			updates[SpecCoverageKeyPrefix+acid] = SpecCoverageCovered
+		} else {
+			updates[SpecCoverageKeyPrefix+acid] = SpecCoverageUncovered
+		}
+	}
+	pctx.MergeWithoutDirty(updates)
+}
+
+// shouldVerifyACIDs reports whether this node has the inputs needed for a
+// verify_acid post-execution pass.
+func (e *Engine) shouldVerifyACIDs(node *Node) bool {
+	if e == nil || e.graph == nil || e.graph.Spec == nil {
+		return false
+	}
+	if node == nil || len(node.VerifyACID) == 0 {
 		return false
 	}
 	return true

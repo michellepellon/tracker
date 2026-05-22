@@ -198,6 +198,12 @@ func convertNode(irNode *ir.Node) (*Node, error) {
 	// Extract IO declarations (reads/writes)
 	extractNodeIO(irNode.IO, gNode.Attrs)
 
+	// Tool-specific: copy VerifyACID through so the engine can grep for
+	// the listed ACIDs after the tool command runs.
+	if tc, ok := irNode.Config.(ir.ToolConfig); ok {
+		gNode.VerifyACID = append([]string(nil), tc.VerifyACID...)
+	}
+
 	return gNode, nil
 }
 

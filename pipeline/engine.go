@@ -351,6 +351,9 @@ func (e *Engine) processActiveNode(ctx context.Context, s *runState, currentNode
 	// Report satisfies coverage when this node succeeded. Best-effort —
 	// reporter errors emit a warning and never block the workflow.
 	if outcome.Status == OutcomeSuccess {
+		// verify_acid runs before pushNodeSuccess so authors can route on
+		// coverage results before any status push lands on the dashboard.
+		e.verifyNodeACIDs(s.pctx, node)
 		e.pushNodeSuccess(ctx, node)
 	}
 

@@ -255,6 +255,14 @@ type Node struct {
 	// and wildcards (`foo.BAR.*`) are resolved on demand against
 	// Graph.Spec. Empty for nodes without spec coverage declarations.
 	Satisfies []string
+
+	// VerifyACID carries the spec requirement references (ACIDs) the
+	// workflow author declared via dippin's tool-node `verify_acid:`
+	// attribute. After a tool command runs, the engine resolves these
+	// patterns against Graph.Spec and greps the working tree for each
+	// ACID literal, setting spec.coverage.<acid> = "covered"|"uncovered"
+	// in PipelineContext. Same pattern syntax as Satisfies.
+	VerifyACID []string
 }
 
 // Edge represents a directed connection between two nodes.

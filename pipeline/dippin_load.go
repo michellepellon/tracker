@@ -107,6 +107,12 @@ func attachSpec(graph *Graph, workflow *ir.Workflow, filename string) error {
 		return err
 	}
 	graph.LintWarnings = append(graph.LintWarnings, warnings...)
+
+	verifyWarnings, err := validateVerifyACIDs(workflow, loaded)
+	if err != nil {
+		return err
+	}
+	graph.LintWarnings = append(graph.LintWarnings, verifyWarnings...)
 	return nil
 }
 
@@ -161,6 +167,41 @@ func checkSatisfiesEntry(nodeID, ref string, loaded spec.Spec) (warning string, 
 		return "", fmt.Errorf("node %q satisfies unknown ACID %q", nodeID, ref)
 	}
 	return fmt.Sprintf("warning[TRK-SAT]: node %q satisfies %q resolves to no requirements", nodeID, ref), nil
+}
+
+// validateVerifyACIDs walks every tool node's VerifyACID entries and resolves
+// them against the loaded spec. Same shape as validateSatisfies: bare unknown
+// ACIDs are fatal, empty wildcards/ranges become TRK-VAC warnings.
+func validateVerifyACIDs(workflow *ir.Workflow, loaded spec.Spec) ([]string, error) {
+	var warnings []string
+	for _, n := range workflow.Nodes {
+		cfg, ok := n.Config.(ir.ToolConfig)
+		if !ok {
+			continue
+		}
+		nodeWarnings, err := validateNodeVerifyACIDs(n.ID, cfg.VerifyACID, loaded)
+		if err != nil {
+			return nil, err
+		}
+		warnings = append(warnings, nodeWarnings...)
+	}
+	return warnings, nil
+}
+
+// validateNodeVerifyACIDs checks every VerifyACID entry on a single tool node.
+func validateNodeVerifyACIDs(nodeID string, refs []string, loaded spec.Spec) ([]string, error) {
+	var warnings []string
+	for _, ref := range refs {
+		matches := loaded.Resolve(ref)
+		if len(matches) > 0 {
+			continue
+		}
+		if isBareACID(ref) {
+			return nil, fmt.Errorf("tool node %q verify_acid references unknown ACID %q", nodeID, ref)
+		}
+		warnings = append(warnings, fmt.Sprintf("warning[TRK-VAC]: tool node %q verify_acid %q resolves to no requirements", nodeID, ref))
+	}
+	return warnings, nil
 }
 
 // isBareACID returns true when ref is a bare ACID (no wildcard, no range) —
