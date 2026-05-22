@@ -1,0 +1,22 @@
+feature:
+  name: full
+  product: full
+  description: exhaustive fixture exercising every supported acai shape
+
+components:
+  AUTH:
+    requirements:
+      1: Short-form requirement.
+      1-note: A note attached to requirement 1.
+      1-1: A sub-requirement of 1.
+      2:
+        requirement: Long-form requirement.
+        deprecated: true
+      3: Third requirement, no notes.
+
+constraints:
+  PKG:
+    description: Packaging constraints.
+    requirements:
+      1: Use uv for package management.
+      2: Target Python 3.11+.

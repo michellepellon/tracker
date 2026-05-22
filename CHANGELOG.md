@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`pkg/spec/` — data layer for spec-first workflow authoring** (PR1 of a planned 6-PR arc). New package providing a `Loader` interface, a `Spec` interface, a `Requirement` type, and a process-level `Registry`. Loaders register themselves at package init; callers resolve them by string name. No runtime integration yet — engine wiring is PR3+.
+- **`pkg/spec/acai/` — first `Loader` implementation** for acai's `feature.yaml` format. Handles short-form / long-form requirement shapes, sub-requirements, `<N>-note:` annotations, the deprecated flag, and the components vs. constraints distinction. Implements ACID pattern resolution: bare (`foo.BAR.1`), range (`foo.BAR.[1-3]`), and wildcard (`foo.BAR.*`).
+- Real-world regression test fixture loading the cognitoforms-py `features.yaml` to lock the contract.
+
+### Changed
+
+- `go.mod` pins `github.com/2389-research/dippin-lang` via a `replace` directive pointing at [michellepellon/dippin-lang@1e446b9](https://github.com/michellepellon/dippin-lang/commit/1e446b9) to consume the unreleased `spec:` + `satisfies:` grammar (dippin PR #1, merged). The directive will be removed and the require line bumped once 2389-research/dippin-lang tags a release that includes the grammar.
+
+### Reference
+
+See `docs/superpowers/specs/2026-05-22-spec-loader-design.md` for design rationale and the full 6-PR plan. Motivated by acai's [specsmaxxing](https://acai.sh/blog/specsmaxxing) post.
+
 ## [0.30.0] - 2026-05-19
 
 ### Changed

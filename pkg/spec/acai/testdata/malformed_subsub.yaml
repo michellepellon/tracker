@@ -1,0 +1,9 @@
+feature:
+  name: bad
+  product: bad
+
+components:
+  A:
+    requirements:
+      1: top-level requirement
+      1-1-1: invalid sub-sub-requirement
