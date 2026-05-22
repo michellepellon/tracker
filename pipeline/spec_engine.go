@@ -18,9 +18,11 @@ import (
 	"github.com/2389-research/tracker/pkg/spec/reporter"
 )
 
-// SpecStatusKeyPrefix is the PipelineContext internal-key prefix under which
-// the engine stashes ACID statuses pulled at Run start. Downstream features
-// (PR5: condition evaluator) read these via GetInternal.
+// SpecStatusKeyPrefix is the PipelineContext key prefix under which the
+// engine stashes ACID statuses pulled at Run start. The keys live in the
+// user-visible context (writable via MergeWithoutDirty so they don't bleed
+// into node-scoped namespaces). Workflow authors route on them with
+// conditions like `when ctx.spec.status.foo.BAR.1 = pass`.
 const SpecStatusKeyPrefix = "spec.status."
 
 // Context keys populated by injectSatisfiesContext for nodes that declare
@@ -49,9 +51,18 @@ func (e *Engine) pullSpecStatuses(ctx context.Context, pctx *PipelineContext) {
 		e.emitSpecWarning(fmt.Sprintf("spec reporter pull failed: %v", err))
 		return
 	}
-	for acid, status := range statuses {
-		pctx.SetInternal(SpecStatusKeyPrefix+acid, status.State.String())
+	if len(statuses) == 0 {
+		return
 	}
+	updates := make(map[string]string, len(statuses))
+	for acid, status := range statuses {
+		updates[SpecStatusKeyPrefix+acid] = status.State.String()
+	}
+	// MergeWithoutDirty stores the keys in the user-visible context (so the
+	// condition evaluator can read them as `ctx.spec.status.<acid>`) without
+	// marking them dirty (so they don't bleed into per-node scoped
+	// namespaces when ScopeToNode runs after each handler).
+	pctx.MergeWithoutDirty(updates)
 }
 
 // pushNodeSuccess reports a node's satisfies set as StatePass to the matching

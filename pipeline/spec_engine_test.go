@@ -92,11 +92,11 @@ func TestPullSpecStatuses_PopulatesPipelineContext(t *testing.T) {
 	if fake.pullCalls != 1 {
 		t.Errorf("Pull called %d times, want 1", fake.pullCalls)
 	}
-	got, _ := pctx.GetInternal("spec.status.example.AUTH.1")
+	got, _ := pctx.Get("spec.status.example.AUTH.1")
 	if got != "pass" {
 		t.Errorf("ctx[spec.status.example.AUTH.1] = %q, want pass", got)
 	}
-	got2, _ := pctx.GetInternal("spec.status.example.AUTH.2")
+	got2, _ := pctx.Get("spec.status.example.AUTH.2")
 	if got2 != "fail" {
 		t.Errorf("ctx[spec.status.example.AUTH.2] = %q, want fail", got2)
 	}
