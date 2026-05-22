@@ -6,9 +6,13 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/2389-research/tracker/pkg/spec"
 	"github.com/2389-research/tracker/pkg/spec/reporter"
@@ -16,8 +20,17 @@ import (
 
 // SpecStatusKeyPrefix is the PipelineContext internal-key prefix under which
 // the engine stashes ACID statuses pulled at Run start. Downstream features
-// (PR4+: condition evaluator, prompt injection) read these via GetInternal.
+// (PR5: condition evaluator) read these via GetInternal.
 const SpecStatusKeyPrefix = "spec.status."
+
+// Context keys populated by injectSatisfiesContext for nodes that declare
+// `satisfies:`. Authors interpolate `${ctx.spec.requirements}` (YAML) or
+// `${ctx.spec.requirements_json}` (JSON) in their prompt or other expandable
+// fields to receive the resolved requirement slice.
+const (
+	SpecRequirementsKey     = "spec.requirements"
+	SpecRequirementsJSONKey = "spec.requirements_json"
+)
 
 // pullSpecStatuses calls the matching reporter's Pull (if Available) and
 // seeds the PipelineContext with one internal key per ACID. Best-effort:
@@ -133,4 +146,118 @@ func (e *Engine) emitSpecWarning(msg string) {
 		Type:    EventWarning,
 		Message: msg,
 	})
+}
+
+// injectSatisfiesContext populates two PipelineContext keys with the
+// requirement slice resolved from a node's Satisfies declarations:
+//
+//	spec.requirements       YAML (deterministic, sorted-by-ACID)
+//	spec.requirements_json  JSON (same data, easier for tool nodes to parse)
+//
+// Authors interpolate these via ${ctx.spec.requirements} in their prompt
+// or other expandable fields. The keys are node-scoped: nodes without
+// Satisfies, or workflows without a loaded spec, get both keys cleared
+// to empty string so a prior node's content cannot bleed into this node's
+// prompt expansion.
+func (e *Engine) injectSatisfiesContext(pctx *PipelineContext, node *Node) {
+	if !e.shouldInjectSatisfies(node) {
+		pctx.Set(SpecRequirementsKey, "")
+		pctx.Set(SpecRequirementsJSONKey, "")
+		return
+	}
+	reqs := resolveSatisfies(node.Satisfies, e.graph.Spec)
+	if len(reqs) == 0 {
+		pctx.Set(SpecRequirementsKey, "")
+		pctx.Set(SpecRequirementsJSONKey, "")
+		return
+	}
+	yamlBytes, err := marshalRequirementsYAML(reqs)
+	if err != nil {
+		e.emitSpecWarning(fmt.Sprintf("spec requirements YAML serialization for node %q failed: %v", node.ID, err))
+		return
+	}
+	jsonBytes, err := marshalRequirementsJSON(reqs)
+	if err != nil {
+		e.emitSpecWarning(fmt.Sprintf("spec requirements JSON serialization for node %q failed: %v", node.ID, err))
+		return
+	}
+	pctx.Set(SpecRequirementsKey, string(yamlBytes))
+	pctx.Set(SpecRequirementsJSONKey, string(jsonBytes))
+}
+
+// shouldInjectSatisfies reports whether the engine has the inputs needed to
+// build a spec.requirements value for this node.
+func (e *Engine) shouldInjectSatisfies(node *Node) bool {
+	if e == nil || e.graph == nil || e.graph.Spec == nil {
+		return false
+	}
+	if node == nil || len(node.Satisfies) == 0 {
+		return false
+	}
+	return true
+}
+
+// resolveSatisfies walks a node's satisfies patterns, resolves each via the
+// loaded spec, deduplicates by ACID, and returns the result sorted by ACID
+// for deterministic output.
+func resolveSatisfies(patterns []string, loaded spec.Spec) []spec.Requirement {
+	seen := map[string]bool{}
+	var out []spec.Requirement
+	for _, pat := range patterns {
+		for _, r := range loaded.Resolve(pat) {
+			if seen[r.ID] {
+				continue
+			}
+			seen[r.ID] = true
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// requirementDoc is the serialization shape for one requirement in YAML/JSON.
+// Stable field ordering and omitempty rules give us byte-deterministic output
+// for the same input. Defined as a struct (not raw map) so the field order in
+// the YAML output matches the order declared here.
+type requirementDoc struct {
+	ID         string   `json:"id" yaml:"id"`
+	Feature    string   `json:"feature" yaml:"feature"`
+	Component  string   `json:"component" yaml:"component"`
+	Number     string   `json:"number" yaml:"number"`
+	Kind       string   `json:"kind" yaml:"kind"`
+	Text       string   `json:"text" yaml:"text"`
+	Notes      []string `json:"notes,omitempty" yaml:"notes,omitempty"`
+	Deprecated bool     `json:"deprecated,omitempty" yaml:"deprecated,omitempty"`
+	Parent     string   `json:"parent,omitempty" yaml:"parent,omitempty"`
+}
+
+func docFromRequirement(r spec.Requirement) requirementDoc {
+	return requirementDoc{
+		ID:         r.ID,
+		Feature:    r.Feature,
+		Component:  r.Component,
+		Number:     r.Number,
+		Kind:       r.Kind.String(),
+		Text:       r.Text,
+		Notes:      r.Notes,
+		Deprecated: r.Deprecated,
+		Parent:     r.Parent,
+	}
+}
+
+func marshalRequirementsYAML(reqs []spec.Requirement) ([]byte, error) {
+	docs := make([]requirementDoc, len(reqs))
+	for i, r := range reqs {
+		docs[i] = docFromRequirement(r)
+	}
+	return yaml.Marshal(docs)
+}
+
+func marshalRequirementsJSON(reqs []spec.Requirement) ([]byte, error) {
+	docs := make([]requirementDoc, len(reqs))
+	for i, r := range reqs {
+		docs[i] = docFromRequirement(r)
+	}
+	return json.Marshal(docs)
 }
