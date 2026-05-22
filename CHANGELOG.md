@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`pkg/spec/` — data layer for spec-first workflow authoring** (PR1 of a planned 6-PR arc). New package providing a `Loader` interface, a `Spec` interface, a `Requirement` type, and a process-level `Registry`. Loaders register themselves at package init; callers resolve them by string name. No runtime integration yet — engine wiring is PR3+.
 - **`pkg/spec/acai/` — first `Loader` implementation** for acai's `feature.yaml` format. Handles short-form / long-form requirement shapes, sub-requirements, `<N>-note:` annotations, the deprecated flag, and the components vs. constraints distinction. Implements ACID pattern resolution: bare (`foo.BAR.1`), range (`foo.BAR.[1-3]`), and wildcard (`foo.BAR.*`).
 - Real-world regression test fixture loading the cognitoforms-py `features.yaml` to lock the contract.
+- **`pkg/spec/reporter/` — bidirectional status transport** (PR2 of the spec-first arc). New package providing a `Reporter` interface, `Target` / `Status` / `State` types, and a process-level Registry. Reporters can `Pull` existing ACID statuses (for resume / skip-already-done at workflow start) and `Push` updates (so the spec dashboard reflects engine progress). Pure transport — no batching, retry, or caching at this layer (engine composes policy in PR3).
+- **`pkg/spec/reporter/acai/` — first `Reporter` implementation.** Wraps the `acai` CLI via subprocess rather than re-implementing the HTTP client; CLI handles auth, server URL resolution, and JSON envelope shape. Injectable `commandRunner` for unit testability. Integration tests behind a build tag (`-tags=integration`) exercise the live binary and skip when `ACAI_API_TOKEN` is absent.
 
 ### Changed
 
