@@ -2,7 +2,11 @@
 // ABOUTME: Provides shape-to-handler mapping and graph traversal helpers.
 package pipeline
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/2389-research/tracker/pkg/spec"
+)
 
 // shapeHandlerMap maps DOT node shapes to handler names.
 var shapeHandlerMap = map[string]string{
@@ -62,6 +66,18 @@ type Graph struct {
 	// single-line convention ("warning[DIPxxx]: ...") to render cleanly
 	// inside bulleted "Validation Warnings" output.
 	LintWarnings []string
+
+	// Spec is the external spec document referenced by the workflow's
+	// `spec:` header, if any. Populated by LoadDippinWorkflowFromIR when
+	// the workflow declares a spec; nil otherwise. The engine reads this
+	// at Run start to call the matching reporter's Pull, and consults it
+	// when reporting status on successful satisfies-bearing nodes.
+	Spec spec.Spec
+
+	// SpecLoader is the loader name from the workflow's `spec: <name> <path>`
+	// header (e.g. "acai"). The engine uses this to look up the matching
+	// reporter at Run start. Empty when no spec is attached.
+	SpecLoader string
 
 	// Adjacency indexes for O(1) edge lookup. Built by AddEdge.
 	outgoing map[string][]*Edge
@@ -232,6 +248,13 @@ type Node struct {
 	Label   string
 	Attrs   map[string]string
 	Handler string
+
+	// Satisfies carries the spec requirement references (ACIDs) the
+	// workflow author declared via dippin's `satisfies:` node attribute.
+	// Patterns are stored verbatim — bare ACIDs, ranges (`foo.BAR.[1-3]`),
+	// and wildcards (`foo.BAR.*`) are resolved on demand against
+	// Graph.Spec. Empty for nodes without spec coverage declarations.
+	Satisfies []string
 }
 
 // Edge represents a directed connection between two nodes.

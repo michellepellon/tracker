@@ -1,0 +1,15 @@
+workflow WithSpec
+  goal: "exercise spec loader"
+  spec: acai with_spec_features.yaml
+  start: A
+  exit: B
+
+  agent A
+    satisfies: example.AUTH.1, example.AUTH.2
+    prompt: do it
+
+  agent B
+    prompt: done
+
+  edges
+    A -> B

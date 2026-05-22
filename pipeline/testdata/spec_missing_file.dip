@@ -1,0 +1,14 @@
+workflow MissingSpec
+  goal: "spec path does not exist"
+  spec: acai does-not-exist.yaml
+  start: A
+  exit: B
+
+  agent A
+    prompt: do it
+
+  agent B
+    prompt: done
+
+  edges
+    A -> B
