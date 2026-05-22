@@ -1,0 +1,131 @@
+# ABOUTME: Behavioral spec for the cognitoforms-py Python client covering the full Cognito Forms REST and OData surface.
+# ABOUTME: Acceptance criteria are addressed by stable ACIDs (e.g. cognitoforms-py.ENTRIES.3) referenced from code and tests.
+
+feature:
+  name: cognitoforms-py
+  product: cognitoforms-py
+  description: >
+    A Python client for the Cognito Forms REST API and OData service that lets callers
+    list forms, read form schemas, manage entries, upload files, retrieve rendered
+    documents, run bulk imports, and query entries via OData — without third-party tools.
+
+components:
+
+  AUTH:
+    description: How the client authenticates to Cognito Forms.
+    requirements:
+      1: "A caller can construct the client with an API access token and have it sent on every request as `Authorization: Bearer <token>`."
+      2: "A caller can opt to send the access token as an `access_token` query-string parameter instead of as a header, for environments that strip custom headers."
+      3: "Requests made without a token (or with an empty token) raise a configuration error before any HTTP call is made."
+      4: "The token is never written to logs, exception messages, or string representations of the client."
+
+  CLIENT:
+    description: Construction, lifecycle, and dispatch of HTTP requests.
+    requirements:
+      1: "The client targets `https://www.cognitoforms.com/api` by default and accepts an override base URL for testing or self-hosted environments."
+      2: "The client exposes a synchronous interface for every REST operation listed in the FORMS, ENTRIES, FILES, DOCUMENTS, and IMPORTS components."
+      3: "The client exposes an asynchronous interface (parallel to the synchronous one) for every operation in 2."
+      4: "The client can be used as a context manager so underlying HTTP resources are released deterministically."
+      5: "A caller can pass a custom per-request timeout, and a default client-wide timeout applies otherwise."
+      6: "A caller can supply a custom user agent, and a default user agent identifying the library and version is sent otherwise."
+
+  FORMS:
+    description: Operations against the Forms collection.
+    requirements:
+      1: "A caller can list all forms in the organization accessible to their token, excluding archived forms."
+      2: "A caller can fetch the JSON schema for a form by form ID, including fields, data types, descriptions, and valid values."
+      3: "When fetching a form schema, a caller can request that hyperlinks to related resources be included."
+      4: "A caller can fetch the JSON schema for a form by form ID with an `input` parameter that previews the schema as it would apply to a specific entry payload."
+      5: "A caller can update a form's public-link availability by setting a start date, end date, and not-available message."
+
+  ENTRIES:
+    description: CRUD operations against entries of a specific form.
+    requirements:
+      1: "A caller can retrieve a single entry by form ID and entry ID and receive all field values plus entry metadata."
+      2: "A caller can create a new entry by form ID and entry payload and receive the full saved entry (including calculated fields) in the response."
+      3: "A caller can partially update an entry by form ID and entry ID, sending only the fields they want to change."
+      4: "A caller can clear an array field on an entry by passing an empty array, and can clear a section or sub-object by passing null."
+      5: "A caller can delete an entry by form ID and entry ID."
+      6: "Attempts to set a calculation field directly are rejected by the API, and the client surfaces that rejection as a typed error rather than silently dropping it."
+      7: "Attempts to write to a file-upload field via create/update are rejected by the API, and the client surfaces that rejection as a typed error."
+      8: "When a concurrent-update conflict occurs on update, the client raises a distinct error type (mapped from HTTP 409) so callers can retry deliberately."
+
+  FILES:
+    description: File upload and retrieval associated with entries.
+    requirements:
+      1: "A caller can upload a file (bytes plus filename and content type) and receive a File ID usable as a value for a file-upload field on a subsequent create/update."
+      2: "A caller is informed (in docs and in the type signature) that an unattached File ID expires 48 hours after upload."
+      3: "A caller can download a file attached to an entry by form ID, entry ID, and file ID, receiving both the binary content and its metadata (name, content type, size)."
+
+  DOCUMENTS:
+    description: Retrieval of generated entry documents.
+    requirements:
+      1: "A caller can download a generated document for an entry by form ID, entry ID, and template ID, receiving the binary content and its content type."
+
+  IMPORTS:
+    description: Bulk creation, update, and deletion of entries via uploaded files.
+    requirements:
+      1: "A caller can submit an import job for a form by uploading a `.csv` or `.xlsx` file along with an import mode of `CreateNew`, `UpdateExisting`, or `SyncEntries`, and receive an import ID and initial status."
+      2: "A caller can optionally supply a notification email address and an entry-ID substitute field name when starting an import."
+      3: "A caller can poll the status of an import by form ID and import ID and receive its current status, success count, failure count, total count, and a link to the annotated results file."
+
+  ODATA:
+    description: Read-only access to forms and entries via the OData service.
+    requirements:
+      1: "A caller can list all forms exposed via OData for their token."
+      2: "A caller can fetch metadata for a single form by form ID via OData."
+      3: "A caller can list entries for a form's grid View by form ID and view ID via OData."
+      4: "A caller can request only entry IDs for a view (via `$select=Id`) without paying the cost of fetching all fields."
+      5: "A caller can request the count of entries in a view (via `$count`) without fetching the entries themselves."
+      6: "A caller can fetch a single entry from a view by form ID, view ID, and entry ID via OData."
+
+  ERRORS:
+    description: How API failures surface to callers.
+    requirements:
+      1: "Failed responses are raised as exceptions whose type reflects the failure category (authentication, authorization, not-found, validation, conflict, rate-limit, server, or unknown)."
+      2: "Every raised exception exposes the API-provided `Type`, `Message`, `SupportCode`, and `Data` fields plus the HTTP status code."
+      3: "A 429 Too Many Requests response raises a distinct rate-limit error that carries any retry-after value provided by the response."
+      4: "Network-level failures (connection error, read timeout) raise a distinct transport error rather than the same type as API-returned errors, so callers can tell them apart."
+
+constraints:
+
+  PACKAGING:
+    description: How the library is packaged and distributed.
+    requirements:
+      1: "The project is managed with `uv` and has a `pyproject.toml` declaring its dependencies, entry points, and supported Python versions."
+      2: "The library targets Python 3.11+."
+      3: "The library declares only the HTTP client(s) it actually needs as runtime dependencies; development tooling is in a separate dependency group."
+
+  TYPING:
+    description: Type-safety expectations.
+    requirements:
+      1: "Every public function, method, and class is fully type-annotated, including request payloads and response models."
+      2: "The type-checker (pyright in strict mode) passes with no errors on the public API surface."
+      3: "Entry and form payloads are exposed as typed models (e.g. pydantic or dataclasses) rather than raw dicts, while still allowing escape hatches for arbitrary additional fields the schema introduces."
+
+  RATE_LIMIT:
+    description: Behaviour under rate limiting and transient failure.
+    requirements:
+      1: "The client retries idempotent requests (GET, DELETE) on transport errors and 5xx responses using exponential backoff with jitter, up to a configurable maximum attempt count."
+      2: "The client retries on 429 responses honouring any retry-after hint, up to the same configurable maximum attempt count."
+      3: "Retry behaviour can be disabled by the caller for the entire client or for a single call."
+
+  OBSERVABILITY:
+    description: What callers can see when things go wrong.
+    requirements:
+      1: "Every outbound request and inbound response is emitted on a named logger so callers can wire it into their own logging without source modifications."
+      2: "Log records never contain the access token or the contents of uploaded files."
+
+  TESTING:
+    description: Test coverage expectations.
+    requirements:
+      1: "Every ACID in this spec has at least one automated test that references the ACID by full ID in the test name."
+      2: "Unit tests cover the client in isolation against a mocked HTTP transport."
+      3: "Integration tests exercise the client against the live Cognito Forms API using a token supplied via environment variable, and are skipped (not failed) when the token is absent."
+      4: "An end-to-end test creates an entry, updates it, retrieves it, and deletes it against a live form, leaving no residual data on success or failure."
+
+  CODE_STYLE:
+    description: Repo-wide style requirements.
+    requirements:
+      1: "Every source file begins with a 2-line `ABOUTME:` comment."
+      2: "The repo passes `ruff check` and `ruff format --check` in CI."

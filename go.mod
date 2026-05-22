@@ -5,7 +5,7 @@ go 1.25.5
 require github.com/awalterschulze/gographviz v2.0.3+incompatible
 
 require (
-	github.com/2389-research/dippin-lang v0.29.0
+	github.com/2389-research/dippin-lang v0.30.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v0.10.0
@@ -49,6 +49,7 @@ require (
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
+	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 	mvdan.cc/sh/v3 v3.13.1 // indirect
 )
 

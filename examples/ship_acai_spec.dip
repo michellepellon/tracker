@@ -1,0 +1,63 @@
+workflow ShipAcaiSpec
+  goal: "Implement a Python library against an acai feature spec, with per-ACID verification and dashboard reporting."
+  spec: acai features/cognitoforms-py/features.yaml
+  requires: git
+  start: Start
+  exit: Done
+
+  defaults
+    model: claude-sonnet-4-6
+    provider: anthropic
+    max_retries: 2
+
+  agent Start
+    label: Start
+
+  agent Implement
+    label: "Implement spec requirements"
+    satisfies: cognitoforms-py.AUTH.*, cognitoforms-py.CLIENT.*, cognitoforms-py.FORMS.*, cognitoforms-py.ENTRIES.*, cognitoforms-py.FILES.*, cognitoforms-py.DOCUMENTS.*, cognitoforms-py.IMPORTS.*, cognitoforms-py.ODATA.*, cognitoforms-py.ERRORS.*
+    prompt:
+      You are implementing a Python library against an acai feature spec.
+
+      Requirements you must satisfy:
+
+      ${ctx.spec.requirements}
+
+      Rules:
+      - Reference each ACID in a comment (e.g. `# cognitoforms-py.AUTH.1`) near
+        the code that satisfies it.
+      - Write a unit test for each ACID; mirror the ACID in the test name
+        (e.g. `def test_cognitoforms_py_AUTH_1_...():`).
+      - Use uv for packaging; pyproject.toml at the repo root.
+      - Every source file begins with a 2-line ABOUTME comment.
+
+  tool Verify
+    label: "Verify ACIDs are referenced in code and tests"
+    timeout: 30s
+    command:
+      set -eu
+      printf 'verifying ACID coverage under src/ and tests/\n'
+      if [ -d src ] || [ -d tests ]; then
+        grep -rn 'cognitoforms-py\.' src/ tests/ 2>/dev/null || printf 'no refs found yet\n'
+      else
+        printf 'no src/ or tests/ directories yet\n'
+      fi
+    verify_acid: cognitoforms-py.AUTH.*, cognitoforms-py.CLIENT.*, cognitoforms-py.FORMS.*, cognitoforms-py.ENTRIES.*, cognitoforms-py.FILES.*, cognitoforms-py.DOCUMENTS.*, cognitoforms-py.IMPORTS.*, cognitoforms-py.ODATA.*, cognitoforms-py.ERRORS.*
+
+  agent FixGaps
+    label: "Fill in uncovered ACIDs"
+    prompt:
+      One or more ACIDs from the spec are not yet referenced in code or tests.
+      Implement the missing requirements; the spec is below.
+
+      ${ctx.spec.requirements}
+
+  agent Done
+    label: Done
+
+  edges
+    Start -> Implement
+    Implement -> Verify
+    Verify -> Done    when ctx.spec.coverage.cognitoforms-py.AUTH.1 = covered
+    Verify -> FixGaps when ctx.spec.coverage.cognitoforms-py.AUTH.1 = uncovered
+    FixGaps -> Verify restart: true
